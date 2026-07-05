@@ -1,0 +1,13 @@
+{
+  "_about": "Synthetic stand-in for 'queries sampled from real session history' (layer 1b). Same schema as qa_fixture. At deploy time a real sampler replaces this via load_history_samples(source=...). These are deliberately real-traffic-flavoured (terse, mixed).",
+  "items": [
+    {"id": "h1", "lang": "en", "paraphrase": false, "query": "what's the fork remote again", "knowledge": "the fork remote is origin sam7894604 hermes-agent", "expect_substr": "sam7894604"},
+    {"id": "h2", "lang": "en", "paraphrase": true, "query": "how do we ship recall index rebuilds", "knowledge": "run hermes mem4 rebuild to reconstruct the recall index from source files", "expect_substr": "rebuild"},
+    {"id": "h3", "lang": "zh", "paraphrase": false, "query": "mem4 召回資料庫檔名", "knowledge": "mem4 的召回資料庫是 recall.db,放在 mem4 目錄下", "expect_substr": "recall.db"},
+    {"id": "h4", "lang": "zh", "paraphrase": true, "query": "那個審計表在哪個資料庫", "knowledge": "記憶審計表 907 在 Baserow 資料庫 299", "expect_substr": "299"},
+    {"id": "h5", "lang": "en", "paraphrase": false, "query": "trigram tokenizer for what language", "knowledge": "the trigram tokenizer handles CJK substring search in mem4 recall", "expect_substr": "CJK"},
+    {"id": "h6", "lang": "zh", "paraphrase": false, "query": "Dream 整併會不會動 MEMORY.md", "knowledge": "Dream 只整併 mem4 自有的 L2/L3,永不寫 hot zone MEMORY.md", "expect_substr": "L2/L3"},
+    {"id": "h7", "lang": "en", "paraphrase": true, "query": "keep the model from calling out over the network on warmup", "knowledge": "prefetch is local I/O only, never MCP or network, with a char cap", "expect_substr": "local"},
+    {"id": "h8", "lang": "zh", "paraphrase": false, "query": "backfill 進度存哪", "knowledge": "backfill 進度以 backfill_cursor 記在 mem4_state.json,可續跑", "expect_substr": "backfill_cursor"}
+  ]
+}

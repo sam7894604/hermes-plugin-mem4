@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.cache/
+
+# mem4 runtime data (only ever created under $HERMES_HOME/mem4/, never in-repo,
+# but ignore any stray local copies produced while experimenting)
+mem4/*.db
+mem4/recall.db
+*.db-wal
+*.db-shm
+audit.jsonl
+.mem4_state.json
+.dream_state.json
+.dream.lock
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

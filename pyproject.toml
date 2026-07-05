@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-plugin-mem4"
+version = "0.1.0"
+description = "Four-tier routed memory (L0/L1/L2/L3) as a Hermes MemoryProvider — coexist/augment, local-file backend, Chinese-capable FTS5 recall."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "sam7894604" }]
+keywords = ["hermes", "hermes-plugin", "memory", "memory-provider", "fts5", "rag"]
+
+# Runtime: the default local-file backend uses the stdlib only. mem4 imports a
+# few Hermes-internal modules (agent.memory_provider, tools.registry) that are
+# provided by the running Hermes host, not by PyPI — so there are no install
+# dependencies to declare here.
+dependencies = []
+
+[project.optional-dependencies]
+# Everything needed to run the bundled unit tests in a plain checkout. The test
+# harness (tests/conftest.py) stubs the two Hermes host modules automatically,
+# so no Hermes install is required just to run the tests.
+test = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/sam7894604/hermes-plugin-mem4"
+Source = "https://github.com/sam7894604/hermes-plugin-mem4"
+
+# The plugin is loaded by Hermes directly from this repo (hermes plugins
+# install sam7894604/hermes-plugin-mem4); it is not distributed as a wheel.
+# This section only makes the package importable for local tooling/tests.
+[tool.setuptools]
+packages = ["mem4", "mem4.eval"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

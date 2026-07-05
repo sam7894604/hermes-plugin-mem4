@@ -1,0 +1,29 @@
+{
+  "_about": "mem4 recall QA fixture. Each item: index `knowledge`, run `query` against recall, count correct if any hit's snippet contains `expect_substr`. `paraphrase=true` means the query deliberately avoids the knowledge's wording (tests rephrase-miss — Fable 5 §3/§6). Mix of English + Chinese, exact-identifier + paraphrase, long + short CJK tokens.",
+  "items": [
+    {"id": "en-id-1", "lang": "en", "paraphrase": false, "query": "which VPS provider hosts toothless", "knowledge": "toothless is deployed on a LightNode VPS in Tokyo", "expect_substr": "LightNode"},
+    {"id": "en-id-2", "lang": "en", "paraphrase": false, "query": "Baserow table for memory audit", "knowledge": "The memory_audit data lives in Baserow table 907", "expect_substr": "907"},
+    {"id": "en-id-3", "lang": "en", "paraphrase": false, "query": "which script warms the L1 cache", "knowledge": "mem.sh resolves a route code to the L1 cache microfile", "expect_substr": "mem.sh"},
+    {"id": "en-id-4", "lang": "en", "paraphrase": false, "query": "full text search engine used by mem4", "knowledge": "mem4 recall uses SQLite FTS5 with a trigram tokenizer for CJK", "expect_substr": "FTS5"},
+    {"id": "en-id-5", "lang": "en", "paraphrase": false, "query": "how does toothless reach the NAS", "knowledge": "toothless reaches the NAS over Tailscale at 100.98.31.81", "expect_substr": "Tailscale"},
+    {"id": "en-para-1", "lang": "en", "paraphrase": true, "query": "where is the agent server running", "knowledge": "toothless is deployed on a LightNode VPS in Tokyo", "expect_substr": "LightNode"},
+    {"id": "en-para-2", "lang": "en", "paraphrase": true, "query": "how do we keep records of recall quality", "knowledge": "The memory_audit data lives in Baserow table 907", "expect_substr": "907"},
+    {"id": "en-para-3", "lang": "en", "paraphrase": true, "query": "what indexing technology powers lookups", "knowledge": "mem4 recall uses SQLite FTS5 with a trigram tokenizer for CJK", "expect_substr": "FTS5"},
+    {"id": "en-para-4", "lang": "en", "paraphrase": true, "query": "private network path to the storage box", "knowledge": "toothless reaches the NAS over Tailscale at 100.98.31.81", "expect_substr": "Tailscale"},
+    {"id": "en-para-5", "lang": "en", "paraphrase": true, "query": "the fork we push our branches to", "knowledge": "All mem4 work lives on the fork origin sam7894604 hermes-agent", "expect_substr": "sam7894604"},
+    {"id": "en-id-6", "lang": "en", "paraphrase": false, "query": "default backend for mem4 storage", "knowledge": "mem4 defaults to the local-file backend under HERMES_HOME/mem4", "expect_substr": "local-file"},
+    {"id": "en-id-7", "lang": "en", "paraphrase": false, "query": "what triggers Dream consolidation", "knowledge": "Dream triggers on a threshold of new writes or a staleness floor at session boundaries", "expect_substr": "staleness"},
+    {"id": "zh-id-1", "lang": "zh", "paraphrase": false, "query": "toothless 部署在哪個供應商", "knowledge": "toothless 部署在 LightNode 的 VPS,位於東京機房", "expect_substr": "LightNode"},
+    {"id": "zh-id-2", "lang": "zh", "paraphrase": false, "query": "記憶審計資料表", "knowledge": "記憶審計資料存在 Baserow 資料表 907", "expect_substr": "907"},
+    {"id": "zh-id-3", "lang": "zh", "paraphrase": false, "query": "召回用的全文檢索引擎", "knowledge": "mem4 召回使用 SQLite FTS5,中文走 trigram 分詞", "expect_substr": "FTS5"},
+    {"id": "zh-id-4", "lang": "zh", "paraphrase": false, "query": "四層記憶的架構決策編號", "knowledge": "四層路由記憶的架構決策記錄在 ADR-018", "expect_substr": "ADR-018"},
+    {"id": "zh-id-5", "lang": "zh", "paraphrase": false, "query": "toothless 經什麼直連 NAS", "knowledge": "toothless 經 Tailscale 直連 NAS,位址 100.98.31.81", "expect_substr": "Tailscale"},
+    {"id": "zh-short-1", "lang": "zh", "paraphrase": false, "query": "部署", "knowledge": "本次的部署目標機器是 toothless", "expect_substr": "toothless"},
+    {"id": "zh-short-2", "lang": "zh", "paraphrase": false, "query": "召回", "knowledge": "召回層由 FTS5 提供", "expect_substr": "FTS5"},
+    {"id": "zh-para-1", "lang": "zh", "paraphrase": true, "query": "那台跑 agent 的主機在哪裡", "knowledge": "toothless 部署在 LightNode 的 VPS,位於東京機房", "expect_substr": "LightNode"},
+    {"id": "zh-para-2", "lang": "zh", "paraphrase": true, "query": "命中率的紀錄存在哪", "knowledge": "記憶審計資料存在 Baserow 資料表 907", "expect_substr": "907"},
+    {"id": "zh-para-3", "lang": "zh", "paraphrase": true, "query": "分層記憶為什麼要重構", "knowledge": "四層路由記憶的架構決策記錄在 ADR-018", "expect_substr": "ADR-018"},
+    {"id": "zh-id-6", "lang": "zh", "paraphrase": false, "query": "mem4 預設儲存後端", "knowledge": "mem4 預設用 local-file 後端,放在 HERMES_HOME 下的 mem4 目錄", "expect_substr": "local-file"},
+    {"id": "zh-id-7", "lang": "zh", "paraphrase": false, "query": "Dream 觸發條件", "knowledge": "Dream 由新寫入數超過門檻,或 session 邊界的 staleness 下限觸發", "expect_substr": "staleness"}
+  ]
+}

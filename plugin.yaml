@@ -1,0 +1,28 @@
+name: mem4
+version: 0.1.0
+manifest_version: 1
+description: >-
+  mem4 — four-tier routed memory (L0 hot / L1 cache / L2 microfile / L3 cold)
+  as a Hermes MemoryProvider in coexist/augment mode. Strengthens the built-in
+  MEMORY.md/USER.md without replacing them; disabling it degrades cleanly to
+  pure built-in memory with zero residue. Local-file backend, zero external
+  dependencies (stdlib + SQLite FTS5 only), with Chinese-capable dual-table
+  full-text recall and event-triggered Dream consolidation.
+author: "@sam7894604"
+
+# mem4 registers a MemoryProvider via register(ctx).register_memory_provider().
+# The tools and lifecycle hooks it advertises to the host:
+provides_tools:
+  - mem_route      # read an L2/L3 cold-tier microfile by route code
+  - mem_search     # full-text recall of past turns + cold microfiles (EN + CJK)
+
+provides_hooks:
+  - on_memory_write   # mirror built-in writes into mem4-owned files (never the originals)
+  - on_pre_compress   # keep the routing legend alive across context compression
+  - on_session_end    # Dream consolidation at a session boundary
+  - prefetch          # turn-start local-only recall injection (char-capped)
+  - sync_turn         # index each completed turn into the recall store
+
+# No pip dependencies: the default local-file backend uses the Python stdlib
+# only. mem4 does require the Hermes host at runtime (agent.memory_provider,
+# tools.registry). See README for the CLI subcommands (hermes mem4 rebuild|eval).
