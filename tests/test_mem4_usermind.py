@@ -41,17 +41,56 @@ def test_extract_dedups_and_caps():
     assert len(items) <= 12                          # capped
 
 
-def test_build_summary_uses_llm_only_when_given():
+def test_build_summary_heuristic():
     items = ["偏好繁體中文", "幫我直接填好"]
     plain = build_summary(items)
-    assert "偏好繁體中文" in plain and "候選" in plain
-    # LLM condensation is used only when a callback is supplied.
-    condensed = build_summary(items, llm=lambda body: "CONDENSED")
-    assert "CONDENSED" in condensed
-    # An LLM that raises must not break the summary (falls back to heuristic).
-    def boom(_):
-        raise RuntimeError("no llm")
-    assert "偏好繁體中文" in build_summary(items, llm=boom)
+    assert "偏好繁體中文" in plain and "候選" in plain and "啟發式" in plain
+    assert build_summary([]) == ""
+
+
+def test_extract_drops_assistant_side_and_questions():
+    texts = [
+        "User: 我偏好用繁體中文\nAssistant: 需要我幫你設成預設嗎",
+        "User: 這個要不要幫我留著",   # user-side but a question → dropped
+    ]
+    joined = " | ".join(extract_preferences(texts))
+    assert "偏好用繁體中文" in joined       # user-side preference kept
+    assert "幫你設成預設" not in joined      # assistant-side speech dropped
+    assert "留著" not in joined             # user-side question dropped
+
+
+def test_condense_with_llm_and_fallbacks():
+    from mem4.usermind import condense_with_llm
+    items = ["偏好繁體中文", "幫我一次填好"]
+    # llm receives OpenAI messages, returns condensed text
+    got = condense_with_llm(items, lambda msgs: "- 偏好繁體中文")
+    assert got == "- 偏好繁體中文"
+    # model says "no stable preference" → treated as empty (no proposal)
+    assert condense_with_llm(items, lambda msgs: "(無穩定偏好)") == ""
+    # raising / None llm → '' so the caller falls back to heuristic
+    def boom(msgs):
+        raise RuntimeError("x")
+    assert condense_with_llm(items, boom) == ""
+    assert condense_with_llm(items, None) == ""
+
+
+def test_plan_llm_mode_and_degrade(tmp_path):
+    _memories(tmp_path)
+    mirror = tmp_path / "mem4" / "_mirror"
+    mirror.mkdir(parents=True, exist_ok=True)
+    (mirror / "user.md").write_text("偏好繁體中文·不要反問直接做·需要我幫你確認嗎",
+                                     encoding="utf-8")
+    # llm mode with a mock returning a clean list ⇒ effective llm
+    smz = UserMindSummarizer(
+        tmp_path, mode="llm",
+        llm=lambda msgs: "- 偏好繁體中文\n- 不要反問，直接做")
+    _items, summary = smz.plan()
+    assert smz.last_effective_mode == "llm"
+    assert "LLM 濃縮" in summary and "偏好繁體中文" in summary
+    # llm returns the empty sentinel ⇒ degrade to heuristic (never hard-fails)
+    smz2 = UserMindSummarizer(tmp_path, mode="llm", llm=lambda msgs: "(無穩定偏好)")
+    _i2, s2 = smz2.plan()
+    assert smz2.last_effective_mode == "heuristic" and "啟發式" in s2
 
 
 # -- proposal-only refresh (never touches USER.md) ---------------------------
@@ -181,6 +220,48 @@ def test_cli_usermind_wires_recall_store(tmp_path, monkeypatch, capsys):
     assert "偏好繁體中文" in out                # extracted from the recall turn
     # dry-run must not have written USER.md
     assert not (tmp_path / "memories" / "USER.md").exists()
+
+
+def test_cli_usermind_llm_mode(tmp_path, monkeypatch, capsys):
+    # --mode llm builds a PluginLlm(plugin_id="mem4") and condenses via it; the
+    # host facade is stubbed so this runs offline. Still proposal-only.
+    import sys
+    import types
+    from mem4.recall import RecallStore
+
+    (tmp_path / "memories").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "mem4").mkdir(parents=True, exist_ok=True)
+    store = RecallStore(tmp_path / "mem4" / "recall.db")
+    store.index(ref="turn:s1", content="User: 我偏好繁體中文，回答精簡\nAssistant: 好",
+                kind="turn", ts=1_780_000_000.0)
+    store.close()
+
+    hc = types.ModuleType("hermes_constants")
+    hc.get_hermes_home = lambda: str(tmp_path)
+    monkeypatch.setitem(sys.modules, "hermes_constants", hc)
+
+    # Stub agent.plugin_llm.PluginLlm (host-owned LLM facade).
+    pl = types.ModuleType("agent.plugin_llm")
+
+    class _Res:
+        text = "- 偏好繁體中文\n- 回答精簡"
+
+    class PluginLlm:
+        def __init__(self, **kwargs):
+            pass
+
+        def complete(self, messages, **kwargs):
+            return _Res()
+
+    pl.PluginLlm = PluginLlm
+    monkeypatch.setitem(sys.modules, "agent.plugin_llm", pl)
+
+    from mem4.cli import cmd_usermind
+    cmd_usermind(types.SimpleNamespace(restore=False, apply=False, ts=None, mode="llm"))
+    out = capsys.readouterr().out
+    assert "實際=llm" in out
+    assert "偏好繁體中文" in out and "LLM 濃縮" in out
+    assert not (tmp_path / "memories" / "USER.md").exists()  # dry-run, proposal only
 
 
 def test_provider_dream_refreshes_user_summary_proposal(tmp_path):

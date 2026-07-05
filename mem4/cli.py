@@ -148,7 +148,7 @@ def cmd_usermind(args) -> None:
     from pathlib import Path
     from hermes_constants import get_hermes_home
     _ensure_importable()
-    from mem4.usermind import UserMindSummarizer
+    from mem4.usermind import UserMindSummarizer, make_plugin_llm_adapter
     from mem4.recall import RecallStore
 
     home = get_hermes_home()
@@ -161,6 +161,19 @@ def cmd_usermind(args) -> None:
               else f"  未還原：{result.get('reason')}\n")
         return
 
+    # Resolve mode (--mode flag; default heuristic). In llm mode, build the
+    # host-owned PluginLlm facade for plugin "mem4" (user's active model + auth,
+    # no tools/skills/mcp, zero new key/service). Failure ⇒ degrade to heuristic.
+    mode = (getattr(args, "mode", None) or "heuristic").lower()
+    llm = None
+    if mode == "llm":
+        try:
+            from agent.plugin_llm import PluginLlm
+            llm = make_plugin_llm_adapter(PluginLlm(plugin_id="mem4"))
+        except Exception as e:  # older host / no facade → heuristic
+            print(f"\n  ⚠️ 無法取得 host LLM（{e}）— 降級啟發式。")
+            mode = "heuristic"
+
     # Wire the recall store so the summarizer reads dialogue turns — the PRIMARY
     # source (the USER-write mirror alone is usually empty). Without this the CLI
     # would extract nothing even when the recall DB is full of turns.
@@ -169,9 +182,10 @@ def cmd_usermind(args) -> None:
     if recall_db.is_file():
         recall = RecallStore(recall_db)
     try:
-        smz = UserMindSummarizer(home, recall=recall)
+        smz = UserMindSummarizer(home, recall=recall, llm=llm, mode=mode)
         items, summary = smz.plan()
         print("\nmem4 usermind — USER 心智/偏好摘要 (dry-run)\n" + "─" * 44)
+        print(f"  模式：要求={mode} · 實際={smz.last_effective_mode}")
         if not summary:
             print("  近期對話/鏡射中未抽到顯式偏好陳述 —— 無提案。\n")
             return
@@ -238,6 +252,9 @@ def register_cli(subparser) -> None:
                             help="Write the summary into USER.md's managed block (backup first).")
     usermind_p.add_argument("--restore", action="store_true",
                             help="Restore USER.md from a usermind backup.")
+    usermind_p.add_argument("--mode", choices=["heuristic", "llm"], default=None,
+                            help="heuristic (default) or llm (one bare completion via "
+                                 "the host's active model; no tools/skills/mcp).")
     usermind_p.add_argument("ts", nargs="?", default=None,
                             help="Optional backup timestamp for --restore (default: latest).")
     usermind_p.set_defaults(func=cmd_usermind)

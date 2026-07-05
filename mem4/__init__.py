@@ -205,6 +205,9 @@ class Mem4MemoryProvider(MemoryProvider):
         self._arm = ARM_EXPERIMENT
         self._builtin_chars = 0   # resident built-in memory size (MEMORY.md+USER.md)
         self._legend_chars = len(ROUTING_LEGEND)
+        # §11 optional LLM: host-owned facade captured at register() (ctx.llm).
+        # None ⇒ usermind stays pure-heuristic. Reuses the user's active model.
+        self._plugin_llm = None
 
     # -- identity ------------------------------------------------------------
 
@@ -345,15 +348,39 @@ class Mem4MemoryProvider(MemoryProvider):
             pass
         return True
 
-    def _refresh_user_summary(self, hermes_home) -> None:
-        """Write the heuristic USER mind-summary proposal. Never writes USER.md.
+    def _resolve_user_summary_mode(self) -> str:
+        """memory.mem4.user_summary.mode: heuristic | llm (default heuristic)."""
+        cfg = self._config or {}
+        us = cfg.get("user_summary") if isinstance(cfg.get("user_summary"), dict) else None
+        if us is not None and us.get("mode"):
+            return "llm" if str(us["mode"]).strip().lower() == "llm" else "heuristic"
+        try:
+            from hermes_cli.config import load_config
 
-        LLM condensation stays OFF here: the provider passes no LLM callback, so
-        this path is pure-heuristic / zero-dependency by construction (§11).
+            config = load_config()
+            memory = config.get("memory", {}) if isinstance(config, dict) else {}
+            m4 = memory.get("mem4", {}) if isinstance(memory, dict) else {}
+            uscfg = m4.get("user_summary", {}) if isinstance(m4, dict) else {}
+            if isinstance(uscfg, dict) and uscfg.get("mode"):
+                return "llm" if str(uscfg["mode"]).strip().lower() == "llm" else "heuristic"
+        except Exception:
+            pass
+        return "heuristic"
+
+    def _refresh_user_summary(self, hermes_home) -> None:
+        """Write the USER mind-summary proposal. Never writes USER.md.
+
+        Mode from ``memory.mem4.user_summary.mode`` (default heuristic). In llm
+        mode the optional condensation reuses the host's ``ctx.llm`` (the user's
+        active model + auth — no new key/service; §11 zero-dependency). If no LLM
+        facade was captured at register(), it degrades to heuristic.
         """
-        from .usermind import UserMindSummarizer
+        from .usermind import UserMindSummarizer, make_plugin_llm_adapter
+        mode = self._resolve_user_summary_mode()
+        llm = make_plugin_llm_adapter(self._plugin_llm) if mode == "llm" else None
         UserMindSummarizer(
             hermes_home, recall=self._recall, backend=self._backend,
+            llm=llm, mode=mode,
         ).refresh_proposal()
 
     def shutdown(self) -> None:
@@ -1012,5 +1039,12 @@ class Mem4MemoryProvider(MemoryProvider):
 # ---------------------------------------------------------------------------
 
 def register(ctx) -> None:
-    """Register mem4 as a memory provider plugin."""
-    ctx.register_memory_provider(Mem4MemoryProvider())
+    """Register mem4 as a memory provider plugin.
+
+    Captures the host-owned LLM facade (``ctx.llm``, an ``agent.plugin_llm``
+    instance) if present, so the §11 USER mind-summary can optionally condense
+    via the user's active model. Absent/older host ⇒ stays pure-heuristic.
+    """
+    provider = Mem4MemoryProvider()
+    provider._plugin_llm = getattr(ctx, "llm", None)
+    ctx.register_memory_provider(provider)

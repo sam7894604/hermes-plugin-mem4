@@ -166,14 +166,20 @@ Safety guarantees: the daily `on_memory_write` path **never** writes back (uncha
 ## `hermes mem4 usermind` — §11 USER mind/preference summary (Honcho-lite)
 
 ```bash
-hermes mem4 usermind                 # dry-run: print the summary proposal only (default)
+hermes mem4 usermind                 # dry-run: heuristic proposal only (default)
+hermes mem4 usermind --mode llm      # dry-run, but condense the candidates with the host's active model
 hermes mem4 usermind --apply         # backup → write the summary into USER.md's managed block
 hermes mem4 usermind --restore [ts]  # restore USER.md from a usermind backup
 ```
 
-A **heuristic, zero-LLM, zero-dependency** distillation of the user's *explicit* preference statements (「偏好/不要/幫我/風格…」, `prefer/always/never/…`) from recent dialogue turns + observed built-in USER writes — the Honcho theory-of-mind idea, kept within mem4's zero-dependency principle (design spike §11). LLM condensation is **optional and off by default** (only used if a caller injects an existing LLM callback; mem4 never adds a service/DB/LLM of its own).
+A distillation of the user's *explicit* preference statements (「偏好/不要/幫我/風格…」, `prefer/always/never/…`) from recent dialogue turns + observed built-in USER writes — the Honcho theory-of-mind idea, kept within mem4's zero-dependency principle (design spike §11).
 
-Safety mirrors `refine`: the Dream④ auto path only refreshes a proposal at `mem4/_user_summary_proposal.md` and **never** writes `USER.md`; `--apply` (opt-in) backs up `USER.md` first, writes only a marker-delimited **managed block** (idempotent — re-apply replaces, never appends a second), atomically, and is reversible with `--restore`. Config: `memory.mem4.user_summary.enabled` (default true — proposal generation only).
+Two modes (`--mode`, or `memory.mem4.user_summary.mode`; default `heuristic`):
+
+- **`heuristic`** (default, zero-LLM, zero-dependency) — extract candidates and use them directly. The extractor pre-filters for signal: **User-side text only** (assistant speech dropped), question/offer lines excluded, deduped.
+- **`llm`** — the same heuristic pre-filter, then **one bare completion** to keep only genuinely stable preferences. It reuses the host's own LLM facade (`agent.plugin_llm` / `ctx.llm` → the user's **active model + auth**) with **no tools/skills/mcp and no new key/service/DB** — mem4 never brings its own model. If the facade is unavailable, or the model returns nothing usable, it **degrades to heuristic** (never a hard failure).
+
+Safety mirrors `refine`: the Dream④ auto path only refreshes a proposal at `mem4/_user_summary_proposal.md` and **never** writes `USER.md`; `--apply` (opt-in) backs up `USER.md` first, writes only a marker-delimited **managed block** (idempotent — re-apply replaces, never appends a second), atomically, and is reversible with `--restore`. Config: `memory.mem4.user_summary.enabled` (default true — proposal generation only), `memory.mem4.user_summary.mode` (`heuristic` | `llm`).
 
 ---
 
