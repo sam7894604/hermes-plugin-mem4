@@ -50,6 +50,44 @@ def cmd_eval(args) -> None:
     print(format_full_report(run_all()))
 
 
+def cmd_audit(args) -> None:
+    """Query the local SQLite audit store (② real-traffic measurement).
+
+    Reads ``$HERMES_HOME/mem4/audit.db`` and prints the per-event rollup plus
+    the paired counterfactual (Layer 2). This is the simple query interface over
+    the audit store; for ad-hoc slicing use ``Auditor.query(sql)`` in Python.
+    """
+    from pathlib import Path
+    from hermes_constants import get_hermes_home
+    _ensure_importable()
+    from mem4.audit import Auditor, AUDIT_DB_FILENAME
+    from mem4.eval.harness import paired_counterfactual
+
+    db = Path(get_hermes_home()) / "mem4" / AUDIT_DB_FILENAME
+    events = Auditor(db).read_events()
+    print("\nmem4 audit  (" + str(db) + ")\n" + "─" * 40)
+    if not events:
+        print("  no events yet (enable memory.mem4.audit.enabled: true)\n")
+        return
+    s = Auditor.summarize(events)
+    print(f"  events:                {s['n_events']}  "
+          f"(search={s['n_search']} route={s['n_route']} prefetch={s['n_prefetch']})")
+    print(f"  model-initiated tools: {s['n_tool_calls']}  "
+          f"(the model-decision path; prefetch is automatic)")
+    print(f"  search / route hit:    {s['search_hit_rate']:.0%} / {s['route_hit_rate']:.0%}")
+    print(f"  prefetch trigger rate: {s['prefetch_trigger_rate']:.0%}")
+    print(f"  route distribution:    {s['route_distribution']}")
+    print(f"  avg injected chars:    {s['avg_injected_chars']}")
+    print(f"  median paired diff:    {s['median_paired_diff_tokens']} tokens "
+          f"(baseline−mem4; counterfactual — see note)")
+    paired = paired_counterfactual(events)
+    if paired.get("n"):
+        pd = paired["paired_diff_tokens"]
+        print(f"  paired diff min/med/max: {pd['min']:.0f}/{pd['median']:.0f}/{pd['max']:.0f}  "
+              f"(mem4 cheaper {paired['mem4_cheaper_fraction']:.0%} of queries)")
+    print()
+
+
 def register_cli(subparser) -> None:
     """Add mem4 subcommands to the ``hermes mem4`` parser."""
     sub = subparser.add_subparsers(dest="mem4_cmd")
@@ -63,6 +101,11 @@ def register_cli(subparser) -> None:
         help="Run the recall A/B harness on the synthetic QA fixture (② measurement).",
     )
     eval_p.set_defaults(func=cmd_eval)
+    audit_p = sub.add_parser(
+        "audit",
+        help="Query the local SQLite audit store (real-traffic measurement).",
+    )
+    audit_p.set_defaults(func=cmd_audit)
 
 
 def mem4_command(args) -> None:
@@ -70,4 +113,5 @@ def mem4_command(args) -> None:
     if getattr(args, "mem4_cmd", None) is None:
         print("\nmem4 — four-tier routed memory provider\n")
         print("  hermes mem4 rebuild   Rebuild the FTS5 recall index from source files")
-        print("  hermes mem4 eval      Run the recall A/B harness (synthetic fixture)\n")
+        print("  hermes mem4 eval      Run the recall A/B harness (synthetic fixture)")
+        print("  hermes mem4 audit     Query the local SQLite audit store (real traffic)\n")

@@ -65,6 +65,7 @@ def test_audit_disabled_writes_nothing(tmp_path):
     p.initialize("s1", hermes_home=str(tmp_path))  # audit default off
     p.sync_turn("remember the deploy host is toothless", "ok")
     p.handle_tool_call("mem_search", {"query": "toothless"})
+    assert not (tmp_path / "mem4" / "audit.db").exists()
     assert not (tmp_path / "mem4" / "audit.jsonl").exists()
     p.shutdown()
 
@@ -94,7 +95,7 @@ def test_experiment_arm_enables_surfaces(tmp_path):
 # -- summarize + Baserow sink (mock) -----------------------------------------
 
 def test_summarize_and_baserow_row_uses_existing_columns(tmp_path):
-    auditor = Auditor(tmp_path / "audit.jsonl", enabled=True, arm="experiment", session_id="s1")
+    auditor = Auditor(tmp_path / "audit.db", enabled=True, arm="experiment", session_id="s1")
     auditor.record_search("q1", route="fts", hit=True, injected_chars=100)
     auditor.record_search("q2", route="like", hit=True, injected_chars=60)
     auditor.record_search("q3", route="", hit=False, injected_chars=0)
@@ -110,6 +111,8 @@ def test_summarize_and_baserow_row_uses_existing_columns(tmp_path):
         captured["table_id"] = table_id
         captured["rows"] = rows
 
+    # export_to_baserow is DEPRECATED (off by default, never auto-called) but
+    # still works for a manual one-off back-fill when handed a writer.
     row = auditor.export_to_baserow(mock_writer, date_str="2026-07-05", name="mem4 audit test")
     assert captured["table_id"] == 907
     # Only columns that exist on table 907.
@@ -121,6 +124,72 @@ def test_summarize_and_baserow_row_uses_existing_columns(tmp_path):
     assert set(row).issubset(existing_907)
     assert row["type"] == "audit"
     assert json.loads(row["notes"])["arm"] == "experiment"
+
+
+# -- SQLite store (new local sink) -------------------------------------------
+
+def test_events_persist_to_sqlite_with_paired_diff(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "audit.db"
+    auditor = Auditor(db, enabled=True, arm="experiment", session_id="s1")
+    auditor.record_search("q1", route="fts", hit=True, injected_chars=100,
+                          baseline_inject_tokens=500, mem4_inject_tokens=90)
+    # The store is a real SQLite DB with an audit_events table.
+    assert db.is_file()
+    conn = sqlite3.connect(str(db))
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(audit_events)")}
+    conn.close()
+    assert {"query", "arm", "route", "hit", "hit_estimated", "tool_called",
+            "baseline_inject_tokens", "mem4_inject_tokens", "paired_diff"}.issubset(cols)
+
+    ev = auditor.read_events()[0]
+    assert ev["paired_diff"] == 500 - 90            # stored, not recomputed
+    assert ev["tool_called"] == "mem_search"
+    assert ev["hit"] is True
+
+
+def test_query_interface_and_summary(tmp_path):
+    auditor = Auditor(tmp_path / "audit.db", enabled=True, arm="experiment", session_id="s1")
+    auditor.record_search("a", route="fts", hit=True, injected_chars=40,
+                          baseline_inject_tokens=500, mem4_inject_tokens=100)
+    auditor.record_prefetch("b longer query text here", injected_chars=80,
+                            baseline_inject_tokens=500, mem4_inject_tokens=120)
+    auditor.record_route("nope", hit=False, injected_chars=0)
+
+    # Arbitrary SQL slice.
+    rows = auditor.query(
+        "SELECT arm, COUNT(*) AS n, AVG(paired_diff) AS d "
+        "FROM audit_events WHERE kind IN ('search','prefetch') GROUP BY arm"
+    )
+    assert rows and rows[0]["arm"] == "experiment" and rows[0]["n"] == 2
+
+    s = auditor.summary()
+    assert s["n_events"] == 3 and s["n_tool_calls"] == 2   # 1 search + 1 route
+    assert s["median_paired_diff_tokens"] > 0               # mem4 injected less
+
+
+def test_legacy_jsonl_imported_once_into_fresh_db(tmp_path):
+    # A pre-existing audit.jsonl (previous sink) sitting next to a fresh db.
+    (tmp_path).mkdir(parents=True, exist_ok=True)
+    legacy = tmp_path / "audit.jsonl"
+    legacy.write_text(
+        json.dumps({"ts": 1.0, "session_id": "old", "arm": "experiment",
+                    "kind": "prefetch", "query": "old q", "tool_called": "",
+                    "hit": True, "hit_estimated": False, "route": "",
+                    "injected_chars": 40, "injected_tokens": 10,
+                    "prefetch_triggered": True,
+                    "baseline_inject_tokens": 400, "mem4_inject_tokens": 90}) + "\n",
+        encoding="utf-8",
+    )
+    auditor = Auditor(tmp_path / "audit.db", enabled=True, arm="experiment", session_id="new")
+    auditor.record_search("new q", route="fts", hit=True, injected_chars=50)
+
+    events = auditor.read_events()
+    # The historical row was imported, plus the new one.
+    assert len(events) == 2
+    old = [e for e in events if e["session_id"] == "old"][0]
+    assert old["kind"] == "prefetch" and old["paired_diff"] == 400 - 90
 
 
 # -- QA harness --------------------------------------------------------------

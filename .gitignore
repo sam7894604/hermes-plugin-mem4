@@ -27,9 +27,11 @@ htmlcov/
 # but ignore any stray local copies produced while experimenting)
 mem4/*.db
 mem4/recall.db
+mem4/audit.db
 *.db-wal
 *.db-shm
 audit.jsonl
+audit.db
 .mem4_state.json
 .dream_state.json
 .dream.lock

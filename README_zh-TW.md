@@ -151,7 +151,7 @@ hermes mem4 rebuild
 
 價值用資料量測,不用估計。內建三樣工具:
 
-1. **稽核器 Auditor**(`memory.mem4.audit.enabled: true`)—— 每次召回/路由/prefetch 事件記一行 JSONL 到 `$HERMES_HOME/mem4/audit.jsonl`(查詢、命中/未命中、路由 `fts`/`trigram`/`like`、注入字元數)。工具呼叫的*未命中*是**精測**;L0 命中率(未用工具的回合)是離線**推估**,並如實標註。
+1. **稽核器 Auditor**(`memory.mem4.audit.enabled: true`)—— 每次召回/路由/prefetch 事件寫一列到本機 SQLite(`$HERMES_HOME/mem4/audit.db`,表 `audit_events`):query、arm、route(`fts`/`trigram`/`like`)、hit/hit_estimated、tool_called、注入字元/token、成對的 baseline/mem4 注入 token,以及 `paired_diff`。用 `hermes mem4 audit`、`Auditor.query(sql)` 或任何 SQLite 客戶端查詢。工具呼叫的*未命中*是**精測**;L0 命中率(未用工具的回合)是離線**推估**,並如實標註。*(Baserow 907 匯出已停用/預設關閉;既有的 `audit.jsonl` 會被一次性匯入 `audit.db`。)*
 2. **A/B 對照臂**(`memory.mem4.arm: experiment | baseline`)。在 `baseline`,mem4 有載入但**所有面向 agent 的介面全關**(無工具、無 system prompt 圖例、無 prefetch 注入),因此熱區/工具表面與純內建一致,而召回儲存仍可量測。用同一份工作負載各跑一臂再比較。
 3. **受控量測工具**(`hermes mem4 eval`)—— 三層設計,讓結果不被流量隨機性混淆,並回報**分布**(最小/中位/最大),而非單一數字:
    - **確定性離線重放**(主要,零隨機)—— 同一組固定輸入對 baseline 與 mem4 各重放一次;逐項:標準命中(**精測**)、注入 token(**精測**)、路由。

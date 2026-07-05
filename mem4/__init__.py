@@ -56,7 +56,7 @@ from .dream import (
     DEFAULT_STALENESS_DAYS,
 )
 from .recall import RecallStore
-from .audit import Auditor, AUDIT_LOG_FILENAME
+from .audit import Auditor, AUDIT_DB_FILENAME
 
 logger = logging.getLogger(__name__)
 
@@ -262,7 +262,7 @@ class Mem4MemoryProvider(MemoryProvider):
             self._builtin_chars = self._read_builtin_memory_chars(hermes_home)
             self._legend_chars = len(ROUTING_LEGEND)
             self._auditor = Auditor(
-                self._root / AUDIT_LOG_FILENAME,
+                self._root / AUDIT_DB_FILENAME,
                 enabled=self._resolve_audit_enabled(),
                 arm=self._arm, session_id=session_id,
             )
