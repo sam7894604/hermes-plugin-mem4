@@ -287,6 +287,22 @@ class Mem4MemoryProvider(MemoryProvider):
             except Exception as e:
                 logger.debug("mem4 dream (session_start) failed (non-fatal): %s", e)
 
+        # §3 refine — refresh the (never-applied) MEMORY.md 精煉提案 on first
+        # bootstrap and on the Dream④ session-start pass. This ONLY writes the
+        # mem4-owned proposal file; it never rewrites the built-in MEMORY.md.
+        # The hard "自動路徑永不回寫" guarantee is preserved: only an explicit
+        # `hermes mem4 refine --apply` ever touches MEMORY.md.
+        try:
+            if self._ran_migration or (self._dream and self._dream.enabled):
+                self._refresh_refine_proposal(hermes_home)
+        except Exception as e:
+            logger.debug("mem4 refine proposal refresh failed (non-fatal): %s", e)
+
+    def _refresh_refine_proposal(self, hermes_home) -> None:
+        """Write the latest refine proposal to a mem4-owned file. Never applies."""
+        from .refine import RefinePlanner
+        RefinePlanner(hermes_home, auditor=self._auditor).refresh_proposal()
+
     def shutdown(self) -> None:
         # Let a running backfill finish briefly, then close the recall DB.
         if self._backfill_thread and self._backfill_thread.is_alive():

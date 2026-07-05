@@ -145,6 +145,20 @@ Clears and rebuilds the recall index from the source-of-truth files (microfiles 
 
 ---
 
+## `hermes mem4 refine` — §3 縮限式放寬 (hot-zone slimming)
+
+```bash
+hermes mem4 refine                 # dry-run: print the proposal only (default)
+hermes mem4 refine --apply         # backup → extract microfiles → atomically rewrite MEMORY.md
+hermes mem4 refine --restore [ts]  # restore MEMORY.md from a backup (latest if ts omitted)
+```
+
+The one **explicit, reversible** exception to the "never write the built-in `MEMORY.md`" rule. It parses the `§<code>` sections of `MEMORY.md` (heuristic-only, zero LLM, zero deps), extracts each into an `$HERMES_HOME/mem4/<code>.md` cold-tier microfile, and condenses `MEMORY.md` to a short header + un-attributed core + a routing index — measurably shrinking the always-loaded hot zone.
+
+Safety guarantees: the daily `on_memory_write` path **never** writes back (unchanged); the auto paths (first bootstrap, Dream④) only refresh a proposal at `mem4/_refine_proposal.md` and **never** apply; `--apply` backs up `MEMORY.md` to `mem4/_refine_backups/MEMORY-<UTCts>.md` first, never silently overwrites an existing microfile (backs it up too), writes atomically (`.tmp` → `os.replace`; on failure the original is untouched), and is fully reversible with `--restore`. Falls back to markdown headings, then size-chunking, when no `§` markers exist. See [`docs/refine-section3-policy.md`](docs/refine-section3-policy.md).
+
+---
+
 ## A/B controlled measurement
 
 > **Honesty first.** The numbers below come from **synthetic / fixture** data — they are a *mechanism proof*, not production results. Real hit rates require deploying to a real workload and collecting actual usage; the same harness then runs against real data. Numbers are labelled **示範 (demonstrative)** where they are not measured on your traffic.

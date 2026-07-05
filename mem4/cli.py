@@ -88,6 +88,57 @@ def cmd_audit(args) -> None:
     print()
 
 
+def cmd_refine(args) -> None:
+    """§3 縮限式放寬 — 精煉 MEMORY.md 熱區。
+
+    預設 dry-run 只出提案；``--apply`` 需顯式且會先備份、可 ``--restore`` 還原；
+    自動路徑（bootstrap / Dream④）永不走這條 apply。
+    """
+    from pathlib import Path
+    from hermes_constants import get_hermes_home
+    _ensure_importable()
+    from mem4.refine import RefinePlanner
+    from mem4.audit import Auditor, AUDIT_DB_FILENAME
+
+    home = get_hermes_home()
+    auditor = Auditor(
+        Path(home) / "mem4" / AUDIT_DB_FILENAME,
+        enabled=True, arm="experiment", session_id="cli-refine",
+    )
+    planner = RefinePlanner(home, auditor=auditor)
+
+    if getattr(args, "restore", False):
+        result = planner.restore(getattr(args, "ts", None))
+        print("\nmem4 refine --restore\n" + "─" * 32)
+        if result.get("restored"):
+            print(f"  已還原 MEMORY.md ← {result['from']}\n")
+        else:
+            print(f"  未還原：{result.get('reason')}\n")
+            backups = planner.list_backups()
+            if backups:
+                print("  可用備份：")
+                for p in backups:
+                    print(f"    {p.name}")
+                print()
+        return
+
+    plan = planner.plan()
+    print(planner.render_plan(plan))
+
+    if getattr(args, "apply", False):
+        result = planner.apply(plan)
+        print("mem4 refine --apply\n" + "─" * 32)
+        if result.get("applied"):
+            print(f"  已改寫 MEMORY.md（{result['before_bytes']} → "
+                  f"{result['after_bytes']} bytes）")
+            print(f"  微檔：{result['microfiles']}  "
+                  f"（覆寫既有並備份：{result['overwritten_microfiles']}）")
+            print(f"  備份：{result['backup']}")
+            print(f"  還原：hermes mem4 refine --restore {result['stamp']}\n")
+        else:
+            print(f"  未套用：{result.get('reason')}\n")
+
+
 def register_cli(subparser) -> None:
     """Add mem4 subcommands to the ``hermes mem4`` parser."""
     sub = subparser.add_subparsers(dest="mem4_cmd")
@@ -106,6 +157,19 @@ def register_cli(subparser) -> None:
         help="Query the local SQLite audit store (real-traffic measurement).",
     )
     audit_p.set_defaults(func=cmd_audit)
+    refine_p = sub.add_parser(
+        "refine",
+        help="Refine (縮限式放寬) MEMORY.md: propose/apply hot-zone slimming.",
+    )
+    refine_p.add_argument("--dry-run", action="store_true",
+                          help="Preview the proposal only (default).")
+    refine_p.add_argument("--apply", action="store_true",
+                          help="Apply: backup, extract microfiles, rewrite MEMORY.md.")
+    refine_p.add_argument("--restore", action="store_true",
+                          help="Restore MEMORY.md from a refine backup.")
+    refine_p.add_argument("ts", nargs="?", default=None,
+                          help="Optional backup timestamp for --restore (default: latest).")
+    refine_p.set_defaults(func=cmd_refine)
 
 
 def mem4_command(args) -> None:
@@ -114,4 +178,5 @@ def mem4_command(args) -> None:
         print("\nmem4 — four-tier routed memory provider\n")
         print("  hermes mem4 rebuild   Rebuild the FTS5 recall index from source files")
         print("  hermes mem4 eval      Run the recall A/B harness (synthetic fixture)")
-        print("  hermes mem4 audit     Query the local SQLite audit store (real traffic)\n")
+        print("  hermes mem4 audit     Query the local SQLite audit store (real traffic)")
+        print("  hermes mem4 refine    Propose/apply MEMORY.md hot-zone slimming (§3)\n")

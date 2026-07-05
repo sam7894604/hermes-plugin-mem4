@@ -145,6 +145,20 @@ hermes mem4 rebuild
 
 ---
 
+## `hermes mem4 refine` —— §3 縮限式放寬(熱區縮小)
+
+```bash
+hermes mem4 refine                 # dry-run:只印提案(預設)
+hermes mem4 refine --apply         # 備份 → 抽微檔 → 原子改寫 MEMORY.md
+hermes mem4 refine --restore [ts]  # 從備份還原 MEMORY.md(省略 ts 取最新)
+```
+
+「絕不回寫內建 `MEMORY.md`」鐵律的**唯一、顯式、可還原**例外。它解析 `MEMORY.md` 的 `§<code>` 段落(純啟發式、零 LLM、零依賴),把每段抽成 `$HERMES_HOME/mem4/<code>.md` 冷區微檔,並把 `MEMORY.md` 濃縮成短標頭 + 無 § 歸屬核心 + 路由索引 —— 可量測地縮小每輪必載的熱區。
+
+安全保證:日常 `on_memory_write` 路徑**永不**回寫(不變);自動路徑(首次 bootstrap、Dream④)只把提案刷新到 `mem4/_refine_proposal.md`,**永不** apply;`--apply` 會先把 `MEMORY.md` 備份到 `mem4/_refine_backups/MEMORY-<UTCts>.md`,絕不靜默覆蓋既有微檔(也一併備份),原子寫入(`.tmp` → `os.replace`;失敗則原檔零改動),並可用 `--restore` 完整還原。無 `§` 標記時降級用 markdown 標題,再無則用大小分塊。詳見 [`docs/refine-section3-policy.md`](docs/refine-section3-policy.md)。
+
+---
+
 ## A/B 受控量測
 
 > **先講誠實。** 下面的數字來自**合成 / fixture** 資料 —— 它們是*機制證明*,不是正式環境結果。真實命中率需要部署到真實工作負載並蒐集實際使用量;同一套工具屆時再對真實資料執行。凡非在你自己流量上量測的數字,一律標為 **示範(demonstrative)**。

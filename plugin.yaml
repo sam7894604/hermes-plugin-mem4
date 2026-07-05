@@ -25,4 +25,5 @@ provides_hooks:
 
 # No pip dependencies: the default local-file backend uses the Python stdlib
 # only. mem4 does require the Hermes host at runtime (agent.memory_provider,
-# tools.registry). See README for the CLI subcommands (hermes mem4 rebuild|eval).
+# tools.registry). See README for the CLI subcommands
+# (hermes mem4 rebuild|eval|audit|refine).
