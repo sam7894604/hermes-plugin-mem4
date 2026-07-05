@@ -154,6 +154,35 @@ def test_no_preferences_is_graceful(tmp_path):
 
 # -- provider Dream④ trigger (proposal-only, never writes USER.md) -----------
 
+def test_cli_usermind_wires_recall_store(tmp_path, monkeypatch, capsys):
+    # Regression: cmd_usermind must construct UserMindSummarizer WITH a
+    # RecallStore, so the CLI sees dialogue turns (the primary source). The bug
+    # passed no recall store, so the CLI extracted nothing even when recall.db
+    # was full of preference-bearing turns.
+    import sys
+    import types
+    from mem4.recall import RecallStore
+
+    (tmp_path / "memories").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "mem4").mkdir(parents=True, exist_ok=True)
+    store = RecallStore(tmp_path / "mem4" / "recall.db")
+    store.index(ref="turn:s1", content="User: 我偏好繁體中文，回答精簡條列",
+                kind="turn", ts=1_780_000_000.0)
+    store.close()
+
+    hc = types.ModuleType("hermes_constants")
+    hc.get_hermes_home = lambda: str(tmp_path)
+    monkeypatch.setitem(sys.modules, "hermes_constants", hc)
+
+    from mem4.cli import cmd_usermind
+    cmd_usermind(types.SimpleNamespace(restore=False, apply=False, ts=None))
+    out = capsys.readouterr().out
+    assert "抽出偏好項" in out                 # a proposal was produced
+    assert "偏好繁體中文" in out                # extracted from the recall turn
+    # dry-run must not have written USER.md
+    assert not (tmp_path / "memories" / "USER.md").exists()
+
+
 def test_provider_dream_refreshes_user_summary_proposal(tmp_path):
     _memories(tmp_path)
     user = tmp_path / "memories" / "USER.md"

@@ -145,42 +145,56 @@ def cmd_usermind(args) -> None:
     預設 dry-run 只出提案;``--apply`` 才寫進 USER.md 的受管區塊(先備份、原子、
     可 ``--restore`` 還原);自動路徑(Dream④)永不走這條 apply。
     """
+    from pathlib import Path
     from hermes_constants import get_hermes_home
     _ensure_importable()
     from mem4.usermind import UserMindSummarizer
+    from mem4.recall import RecallStore
 
     home = get_hermes_home()
-    smz = UserMindSummarizer(home)
 
+    # --restore reads backups only; it needs no recall store.
     if getattr(args, "restore", False):
-        result = smz.restore(getattr(args, "ts", None))
+        result = UserMindSummarizer(home).restore(getattr(args, "ts", None))
         print("\nmem4 usermind --restore\n" + "─" * 32)
         print(f"  已還原 USER.md ← {result['from']}\n" if result.get("restored")
               else f"  未還原：{result.get('reason')}\n")
         return
 
-    items, summary = smz.plan()
-    print("\nmem4 usermind — USER 心智/偏好摘要 (dry-run)\n" + "─" * 44)
-    if not summary:
-        print("  近期對話/鏡射中未抽到顯式偏好陳述 —— 無提案。\n")
-        return
-    print(f"  抽出偏好項：{len(items)}")
-    print("  ┈┈┈ 提案內容 ┈┈┈")
-    for line in summary.splitlines():
-        print("  " + line)
-    print("  ┈┈┈┈┈┈┈┈┈┈┈┈┈┈")
+    # Wire the recall store so the summarizer reads dialogue turns — the PRIMARY
+    # source (the USER-write mirror alone is usually empty). Without this the CLI
+    # would extract nothing even when the recall DB is full of turns.
+    recall = None
+    recall_db = Path(home) / "mem4" / "recall.db"
+    if recall_db.is_file():
+        recall = RecallStore(recall_db)
+    try:
+        smz = UserMindSummarizer(home, recall=recall)
+        items, summary = smz.plan()
+        print("\nmem4 usermind — USER 心智/偏好摘要 (dry-run)\n" + "─" * 44)
+        if not summary:
+            print("  近期對話/鏡射中未抽到顯式偏好陳述 —— 無提案。\n")
+            return
+        print(f"  抽出偏好項：{len(items)}")
+        print("  ┈┈┈ 提案內容 ┈┈┈")
+        for line in summary.splitlines():
+            print("  " + line)
+        print("  ┈┈┈┈┈┈┈┈┈┈┈┈┈┈")
 
-    if getattr(args, "apply", False):
-        result = smz.apply()
-        print("\nmem4 usermind --apply\n" + "─" * 32)
-        if result.get("applied"):
-            print(f"  已寫入 USER.md 受管區塊（{result['items']} 項）")
-            print(f"  備份：{result['backup']}")
-            print(f"  還原：hermes mem4 usermind --restore {result['stamp']}\n")
+        if getattr(args, "apply", False):
+            result = smz.apply()
+            print("\nmem4 usermind --apply\n" + "─" * 32)
+            if result.get("applied"):
+                print(f"  已寫入 USER.md 受管區塊（{result['items']} 項）")
+                print(f"  備份：{result['backup']}")
+                print(f"  還原：hermes mem4 usermind --restore {result['stamp']}\n")
+            else:
+                print(f"  未套用：{result.get('reason')}\n")
         else:
-            print(f"  未套用：{result.get('reason')}\n")
-    else:
-        print("  這是提案（dry-run），未改動 USER.md。--apply 才寫入（會先備份、可 --restore）。\n")
+            print("  這是提案（dry-run），未改動 USER.md。--apply 才寫入（會先備份、可 --restore）。\n")
+    finally:
+        if recall is not None:
+            recall.close()
 
 
 def register_cli(subparser) -> None:
