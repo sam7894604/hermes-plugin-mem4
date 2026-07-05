@@ -63,7 +63,11 @@ memory:
       threshold: 25          # new memory writes before an event-triggered consolidation
       staleness_days: 7      # consolidate at a session boundary if overdue by this
     recall:
-      prefetch_cap: 2000     # max characters prefetch may inject per turn
+      prefetch_cap: 2000     # max characters prefetch may inject per turn (total)
+      prefetch_limit: 5      # max recall hits considered per prefetch
+      microfile_chars: 500   # per-microfile inject cap — matched cold-tier L2 microfiles
+                             # are surfaced fuller (not a 240-char snippet) and ranked first,
+                             # so a weak model gets cold facts WITHOUT calling mem_route
     audit:
       enabled: false         # opt-in: log one JSONL line per recall/route event
     arm: experiment          # experiment | baseline (see Measurement)
@@ -104,7 +108,7 @@ mem4 owns its own SQLite FTS5 database (`$HERMES_HOME/mem4/recall.db`) indexing 
 
 Two surfaces beyond the `mem_search` tool:
 
-- **`prefetch(query)`** — turn-start recall. **Local I/O only** (SQLite + files, never MCP/network — it runs synchronously on the hot path) and capped at `recall.prefetch_char_cap` characters (default 2000).
+- **`prefetch(query)`** — turn-start recall, **microfile-aware**. **Local I/O only** (SQLite + files, never MCP/network — it runs synchronously on the hot path) and capped at `recall.prefetch_cap` characters (default 2000). When the query matches a cold-tier **L2 microfile**, its curated content is injected **more fully** (up to `recall.microfile_chars`) and **ranked ahead** of noisier conversation-turn snippets — so a weak model gets the moved-out facts automatically, without having to call `mem_route`. (The toothless decisive experiment showed weak models rely on this auto-injection, not on proactively routing — design spike §11.)
 - **`sync_turn(...)`** — indexes each completed turn, filtered (min length, tool-output stripped; the store dedups by content hash).
 
 History backfill is **resumable** via a cursor persisted in `.mem4_state.json`, so a restart resumes mid-stream. A real deployment injects a session-history source; without one, only microfiles/mirror are indexed.

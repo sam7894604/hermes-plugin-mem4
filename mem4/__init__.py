@@ -68,6 +68,14 @@ ARM_BASELINE = "baseline"
 
 #: Default cap on characters injected by prefetch() (design spike / Fable 5 §2).
 DEFAULT_PREFETCH_CAP = 2000
+#: Default number of recall hits considered per prefetch.
+DEFAULT_PREFETCH_LIMIT = 5
+#: Default per-microfile inject cap for microfile-aware prefetch. Cold-tier
+#: microfiles are curated knowledge the (esp. weak) model needs in full, so a
+#: matched microfile is injected more generously than a 240-char turn snippet —
+#: the toothless decisive experiment showed weak models rely on auto-prefetch,
+#: not on proactively calling mem_route (design spike §11 next-round).
+DEFAULT_MICROFILE_CHARS = 500
 #: sync_turn filter: minimum user-content length worth indexing.
 _MIN_INDEX_LEN = 12
 #: Backfill batches processed per background worker (bounded per run).
@@ -184,6 +192,8 @@ class Mem4MemoryProvider(MemoryProvider):
         # ① FTS5 recall
         self._recall: Optional[RecallStore] = None
         self._prefetch_cap = DEFAULT_PREFETCH_CAP
+        self._prefetch_limit = DEFAULT_PREFETCH_LIMIT
+        self._microfile_chars = DEFAULT_MICROFILE_CHARS
         # Injectable history source for backfill: fetch(since_rowid, batch_size)
         # -> iterable of (rowid, ref, content, ts). None ⇒ no history backfill
         # (only microfiles are indexed). Real deployments wire a session-store
@@ -248,6 +258,10 @@ class Mem4MemoryProvider(MemoryProvider):
         try:
             self._ran_migration = self._ensure_bootstrap()
             self._prefetch_cap = self._resolve_prefetch_cap()
+            self._prefetch_limit = self._resolve_recall_int(
+                "prefetch_limit", DEFAULT_PREFETCH_LIMIT, floor=1)
+            self._microfile_chars = self._resolve_recall_int(
+                "microfile_chars", DEFAULT_MICROFILE_CHARS, floor=0)
             # ① Build the FTS5 recall store and attach it to the backend so
             # backend.search() is live. Index existing microfiles synchronously
             # (fast, needed for immediate recall); history backfill runs in the
@@ -316,11 +330,23 @@ class Mem4MemoryProvider(MemoryProvider):
         """Inject a history source for backfill (real deployment / tests)."""
         self._backfill_source = fetch
 
-    def _resolve_prefetch_cap(self) -> int:
-        override = (self._config or {}).get("prefetch_cap") if self._config else None
-        if override:
+    def _resolve_recall_int(self, key: str, default: int, *, floor: int) -> int:
+        """Resolve an integer recall knob (memory.mem4.recall.<key>).
+
+        Constructor override (``self._config["recall"][key]`` or the legacy
+        top-level ``self._config[key]``) wins for tests/programmatic use; else
+        read config.yaml ``memory.mem4.recall.<key>``. Clamped to ``floor``.
+        """
+        cfg = self._config or {}
+        override = None
+        recall_cfg = cfg.get("recall") if isinstance(cfg.get("recall"), dict) else None
+        if recall_cfg is not None and recall_cfg.get(key) is not None:
+            override = recall_cfg.get(key)
+        elif cfg.get(key) is not None:
+            override = cfg.get(key)
+        if override is not None:
             try:
-                return max(200, int(override))
+                return max(floor, int(override))
             except (TypeError, ValueError):
                 pass
         try:
@@ -330,11 +356,15 @@ class Mem4MemoryProvider(MemoryProvider):
             memory = config.get("memory", {}) if isinstance(config, dict) else {}
             m4 = memory.get("mem4", {}) if isinstance(memory, dict) else {}
             recall = m4.get("recall", {}) if isinstance(m4, dict) else {}
-            if isinstance(recall, dict) and recall.get("prefetch_cap"):
-                return max(200, int(recall["prefetch_cap"]))
+            if isinstance(recall, dict) and recall.get(key) is not None:
+                return max(floor, int(recall[key]))
         except Exception:
             pass
-        return DEFAULT_PREFETCH_CAP
+        return default
+
+    def _resolve_prefetch_cap(self) -> int:
+        # Back-compat: honour the legacy top-level ``prefetch_cap`` key too.
+        return self._resolve_recall_int("prefetch_cap", DEFAULT_PREFETCH_CAP, floor=200)
 
     def _resolve_arm(self) -> str:
         """Resolve the A/B arm (memory.mem4.arm). Default experiment."""
@@ -696,46 +726,109 @@ class Mem4MemoryProvider(MemoryProvider):
     # -- ① recall: prefetch (turn-start, local-only, capped) -----------------
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        """Recall context for the upcoming turn — LOCAL FTS5 ONLY.
+        """Recall context for the upcoming turn — LOCAL FTS5 ONLY, microfile-aware.
 
         Guardrail (Fable 5 review §2): prefetch runs synchronously on the turn's
         hot path, so it must NEVER make an MCP/network call — it only reads the
         local SQLite recall store and local files. The injected text is capped at
         ``self._prefetch_cap`` characters to bound token cost.
+
+        Microfile-aware (design spike §11 next-round; toothless decisive
+        experiment): the cold-tier L2 microfiles are curated knowledge that left
+        the hot zone. A *weak* model relies on this automatic injection rather
+        than proactively calling ``mem_route``, so when the current query matches
+        a microfile we surface its content **more fully and ranked first**, ahead
+        of noisier conversation-turn snippets — no tool call required.
         """
         # Baseline arm injects nothing (design spike §7 A/B).
         if not self._active or self._recall is None or self._is_baseline():
             return ""
         if not query or len(query.strip()) < _MIN_INDEX_LEN:
             return ""
+        q = query.strip()
+        # Over-fetch a candidate pool so microfiles can be promoted even when
+        # turn snippets crowd the top ranks; then partition by tier.
+        pool = max(self._prefetch_limit * 3, self._prefetch_limit)
         try:
-            hits = self._recall.search(query.strip(), limit=5, now=time.time())
+            hits = self._recall.search(q, limit=pool, now=time.time())
         except Exception as e:
             logger.debug("mem4 prefetch failed (non-fatal): %s", e)
             return ""
-        if not hits:
-            if self._auditor is not None:
-                _b, _m = self._paired_tokens(0)
-                self._auditor.record_prefetch(
-                    query.strip(), injected_chars=0,
+
+        text, n_micro = self._compose_prefetch(hits)
+        if self._auditor is not None:
+            _b, _m = self._paired_tokens(len(text))
+            # Encode microfiles-surfaced count in the (otherwise empty) prefetch
+            # route field so it is queryable without a schema change.
+            auditor = self._auditor
+            try:
+                auditor.record_prefetch(
+                    q, injected_chars=len(text),
                     baseline_inject_tokens=_b, mem4_inject_tokens=_m,
                 )
-            return ""
-        lines = ["## mem4 recall"]
+            except Exception:
+                pass
+        return text
+
+    def _compose_prefetch(self, hits) -> Tuple[str, int]:
+        """Assemble prefetch text from recall hits, microfiles first & fuller.
+
+        Returns ``(text, n_microfiles_surfaced)``. Microfile hits are deduped by
+        route code and injected up to ``self._microfile_chars`` each (their full
+        curated content, not a 240-char snippet); conversation-turn hits keep the
+        short snippet. The whole block is capped at ``self._prefetch_cap``.
+        """
+        micro_lines: List[str] = []
+        turn_lines: List[str] = []
+        seen_codes: set = set()
+        n_micro = 0
         for h in hits:
-            lines.append(f"- ({h.kind}) {h.snippet}")
-        text = "\n".join(lines)
+            if h.kind == "microfile":
+                code = self._microfile_code(h.ref)
+                if code in seen_codes:
+                    continue
+                seen_codes.add(code)
+                content = self._read_microfile_content(h.ref) or h.snippet
+                content = content.strip().replace("\n", " ")
+                if self._microfile_chars and len(content) > self._microfile_chars:
+                    content = content[: self._microfile_chars].rstrip() + "…"
+                label = f"§{code}" if code else "microfile"
+                micro_lines.append(f"- ({label}) {content}")
+                n_micro += 1
+            else:
+                turn_lines.append(f"- (turn) {h.snippet}")
+        if not micro_lines and not turn_lines:
+            return "", 0
+        blocks: List[str] = ["## mem4 recall"]
+        if micro_lines:
+            blocks.append("### 相關冷區微檔（mem4 L2）")
+            blocks.extend(micro_lines[: self._prefetch_limit])
+        if turn_lines:
+            blocks.append("### 相關舊對話")
+            blocks.extend(turn_lines[: self._prefetch_limit])
+        text = "\n".join(blocks)
         if len(text) > self._prefetch_cap:
             suffix = " …[truncated]"
             keep = max(0, self._prefetch_cap - len(suffix))
             text = text[:keep].rstrip() + suffix
-        if self._auditor is not None:
-            _b, _m = self._paired_tokens(len(text))
-            self._auditor.record_prefetch(
-                query.strip(), injected_chars=len(text),
-                baseline_inject_tokens=_b, mem4_inject_tokens=_m,
-            )
-        return text
+        return text, n_micro
+
+    @staticmethod
+    def _microfile_code(ref: str) -> str:
+        """Extract the route code from a recall ref (``microfile:sys`` → ``sys``)."""
+        if ref and ":" in ref:
+            return ref.split(":", 1)[1]
+        return ref or ""
+
+    def _read_microfile_content(self, ref: str) -> Optional[str]:
+        """Read a matched microfile's full content from the backend (local I/O)."""
+        if self._backend is None or not ref.startswith("microfile:"):
+            return None
+        try:
+            result = self._backend.read_microfile(self._microfile_code(ref))
+        except Exception:
+            return None
+        return result.content if result else None
 
     # -- ① recall: sync_turn (filtered, deduped indexing) --------------------
 

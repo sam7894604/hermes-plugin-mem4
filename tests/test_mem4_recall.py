@@ -139,6 +139,47 @@ def test_prefetch_is_capped_and_local(tmp_path):
     p.shutdown()
 
 
+def test_prefetch_surfaces_microfile_fuller_and_first(tmp_path):
+    # A microfile holds curated cold-tier knowledge that left the hot zone.
+    root = tmp_path / "mem4"
+    root.mkdir()
+    long_body = ("pipeline-log.py 把每次執行寫入 Baserow 表 pipeline_runs(900)，"
+                 "cron_mode=auto，watchdog 已刪，採非依賴性扇出加收斂原則，" * 3)
+    (root / "pipe.md").write_text(long_body, encoding="utf-8")
+    p = Mem4MemoryProvider({"backend": "local-file", "dream": {"enabled": False}})
+    p.initialize("s1", hermes_home=str(tmp_path))
+    # Add a noisy turn that also matches, to prove microfiles rank ahead.
+    p.sync_turn("random chatter about pipeline something unrelated padding", "ok")
+    out = p.prefetch("pipeline_runs Baserow pipeline-log cron_mode")
+    assert "相關冷區微檔" in out
+    assert "§pipe" in out
+    # Microfile is injected fuller than a 240-char turn snippet, and appears
+    # before the old-conversation block.
+    assert out.index("相關冷區微檔") < out.index("相關舊對話") if "相關舊對話" in out else True
+    assert "pipeline_runs(900)" in out
+    p.shutdown()
+
+
+def test_prefetch_microfile_chars_cap_and_dedup(tmp_path):
+    root = tmp_path / "mem4"
+    root.mkdir()
+    # Long, tokenizable content (words + spaces) well over the 120-char cap.
+    body = " ".join(["claude-proxy cron paths pip venv host toothless lightnode"] * 20)
+    (root / "sys.md").write_text(body, encoding="utf-8")
+    p = Mem4MemoryProvider({
+        "backend": "local-file", "dream": {"enabled": False},
+        "recall": {"microfile_chars": 120, "prefetch_limit": 3},
+    })
+    p.initialize("s1", hermes_home=str(tmp_path))
+    out = p.prefetch("claude-proxy host toothless lightnode venv")
+    # The injected microfile body is clamped to microfile_chars (+ ellipsis/label).
+    assert "§sys" in out
+    body_line = [ln for ln in out.splitlines() if ln.startswith("- (§sys)")][0]
+    assert len(body_line) < 200  # ~120 chars body + label, not the full ~1180
+    assert body_line.rstrip().endswith("…")  # truncation marker present
+    p.shutdown()
+
+
 def test_backend_search_delegates_to_recall(tmp_path):
     p = _provider(tmp_path)
     p.initialize("s1", hermes_home=str(tmp_path))
