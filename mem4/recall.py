@@ -195,6 +195,26 @@ class RecallStore:
         with self._lock:
             return int(self._conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0])
 
+    def recent(self, *, kind: Optional[str] = None, limit: int = 200) -> List[str]:
+        """Return the most recent doc contents (optionally filtered by kind).
+
+        Newest first. Used by the Dream USER-mind summarizer (§11) to read
+        recent dialogue turns for heuristic preference extraction — local read,
+        no network.
+        """
+        sql = "SELECT content FROM docs"
+        params: list = []
+        if kind:
+            sql += " WHERE kind = ?"
+            params.append(kind)
+        sql += " ORDER BY ts DESC, id DESC LIMIT ?"
+        params.append(int(limit))
+        with self._lock:
+            try:
+                return [r["content"] for r in self._conn.execute(sql, params).fetchall()]
+            except sqlite3.Error:
+                return []
+
     def clear(self) -> None:
         with self._lock:
             self._conn.execute("DELETE FROM docs")

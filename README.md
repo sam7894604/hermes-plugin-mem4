@@ -163,6 +163,20 @@ Safety guarantees: the daily `on_memory_write` path **never** writes back (uncha
 
 ---
 
+## `hermes mem4 usermind` — §11 USER mind/preference summary (Honcho-lite)
+
+```bash
+hermes mem4 usermind                 # dry-run: print the summary proposal only (default)
+hermes mem4 usermind --apply         # backup → write the summary into USER.md's managed block
+hermes mem4 usermind --restore [ts]  # restore USER.md from a usermind backup
+```
+
+A **heuristic, zero-LLM, zero-dependency** distillation of the user's *explicit* preference statements (「偏好/不要/幫我/風格…」, `prefer/always/never/…`) from recent dialogue turns + observed built-in USER writes — the Honcho theory-of-mind idea, kept within mem4's zero-dependency principle (design spike §11). LLM condensation is **optional and off by default** (only used if a caller injects an existing LLM callback; mem4 never adds a service/DB/LLM of its own).
+
+Safety mirrors `refine`: the Dream④ auto path only refreshes a proposal at `mem4/_user_summary_proposal.md` and **never** writes `USER.md`; `--apply` (opt-in) backs up `USER.md` first, writes only a marker-delimited **managed block** (idempotent — re-apply replaces, never appends a second), atomically, and is reversible with `--restore`. Config: `memory.mem4.user_summary.enabled` (default true — proposal generation only).
+
+---
+
 ## A/B controlled measurement
 
 > **Honesty first.** The numbers below come from **synthetic / fixture** data — they are a *mechanism proof*, not production results. Real hit rates require deploying to a real workload and collecting actual usage; the same harness then runs against real data. Numbers are labelled **示範 (demonstrative)** where they are not measured on your traffic.

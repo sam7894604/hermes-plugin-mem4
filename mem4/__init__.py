@@ -312,10 +312,49 @@ class Mem4MemoryProvider(MemoryProvider):
         except Exception as e:
             logger.debug("mem4 refine proposal refresh failed (non-fatal): %s", e)
 
+        # §11 Honcho 借鏡 — Dream④ 產出 USER 心智/偏好摘要(啟發式、零 LLM)。
+        # 同樣只寫 mem4-owned 提案檔,**永不**回寫內建 USER.md(候選制)。
+        try:
+            if self._ran_migration or (self._dream and self._dream.enabled):
+                if self._resolve_user_summary_enabled():
+                    self._refresh_user_summary(hermes_home)
+        except Exception as e:
+            logger.debug("mem4 user-mind summary refresh failed (non-fatal): %s", e)
+
     def _refresh_refine_proposal(self, hermes_home) -> None:
         """Write the latest refine proposal to a mem4-owned file. Never applies."""
         from .refine import RefinePlanner
         RefinePlanner(hermes_home, auditor=self._auditor).refresh_proposal()
+
+    def _resolve_user_summary_enabled(self) -> bool:
+        """memory.mem4.user_summary.enabled (default True — proposal-only, harmless)."""
+        cfg = self._config or {}
+        us = cfg.get("user_summary") if isinstance(cfg.get("user_summary"), dict) else None
+        if us is not None and "enabled" in us:
+            return _coerce_bool(us.get("enabled"), True)
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config()
+            memory = config.get("memory", {}) if isinstance(config, dict) else {}
+            m4 = memory.get("mem4", {}) if isinstance(memory, dict) else {}
+            uscfg = m4.get("user_summary", {}) if isinstance(m4, dict) else {}
+            if isinstance(uscfg, dict) and "enabled" in uscfg:
+                return _coerce_bool(uscfg.get("enabled"), True)
+        except Exception:
+            pass
+        return True
+
+    def _refresh_user_summary(self, hermes_home) -> None:
+        """Write the heuristic USER mind-summary proposal. Never writes USER.md.
+
+        LLM condensation stays OFF here: the provider passes no LLM callback, so
+        this path is pure-heuristic / zero-dependency by construction (§11).
+        """
+        from .usermind import UserMindSummarizer
+        UserMindSummarizer(
+            hermes_home, recall=self._recall, backend=self._backend,
+        ).refresh_proposal()
 
     def shutdown(self) -> None:
         # Let a running backfill finish briefly, then close the recall DB.

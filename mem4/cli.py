@@ -139,6 +139,50 @@ def cmd_refine(args) -> None:
             print(f"  未套用：{result.get('reason')}\n")
 
 
+def cmd_usermind(args) -> None:
+    """§11 — Dream USER 心智/偏好摘要(啟發式、零 LLM)。
+
+    預設 dry-run 只出提案;``--apply`` 才寫進 USER.md 的受管區塊(先備份、原子、
+    可 ``--restore`` 還原);自動路徑(Dream④)永不走這條 apply。
+    """
+    from hermes_constants import get_hermes_home
+    _ensure_importable()
+    from mem4.usermind import UserMindSummarizer
+
+    home = get_hermes_home()
+    smz = UserMindSummarizer(home)
+
+    if getattr(args, "restore", False):
+        result = smz.restore(getattr(args, "ts", None))
+        print("\nmem4 usermind --restore\n" + "─" * 32)
+        print(f"  已還原 USER.md ← {result['from']}\n" if result.get("restored")
+              else f"  未還原：{result.get('reason')}\n")
+        return
+
+    items, summary = smz.plan()
+    print("\nmem4 usermind — USER 心智/偏好摘要 (dry-run)\n" + "─" * 44)
+    if not summary:
+        print("  近期對話/鏡射中未抽到顯式偏好陳述 —— 無提案。\n")
+        return
+    print(f"  抽出偏好項：{len(items)}")
+    print("  ┈┈┈ 提案內容 ┈┈┈")
+    for line in summary.splitlines():
+        print("  " + line)
+    print("  ┈┈┈┈┈┈┈┈┈┈┈┈┈┈")
+
+    if getattr(args, "apply", False):
+        result = smz.apply()
+        print("\nmem4 usermind --apply\n" + "─" * 32)
+        if result.get("applied"):
+            print(f"  已寫入 USER.md 受管區塊（{result['items']} 項）")
+            print(f"  備份：{result['backup']}")
+            print(f"  還原：hermes mem4 usermind --restore {result['stamp']}\n")
+        else:
+            print(f"  未套用：{result.get('reason')}\n")
+    else:
+        print("  這是提案（dry-run），未改動 USER.md。--apply 才寫入（會先備份、可 --restore）。\n")
+
+
 def register_cli(subparser) -> None:
     """Add mem4 subcommands to the ``hermes mem4`` parser."""
     sub = subparser.add_subparsers(dest="mem4_cmd")
@@ -170,6 +214,19 @@ def register_cli(subparser) -> None:
     refine_p.add_argument("ts", nargs="?", default=None,
                           help="Optional backup timestamp for --restore (default: latest).")
     refine_p.set_defaults(func=cmd_refine)
+    usermind_p = sub.add_parser(
+        "usermind",
+        help="Heuristic USER mind/preference summary from Dream (§11); proposal by default.",
+    )
+    usermind_p.add_argument("--dry-run", action="store_true",
+                            help="Preview the summary proposal only (default).")
+    usermind_p.add_argument("--apply", action="store_true",
+                            help="Write the summary into USER.md's managed block (backup first).")
+    usermind_p.add_argument("--restore", action="store_true",
+                            help="Restore USER.md from a usermind backup.")
+    usermind_p.add_argument("ts", nargs="?", default=None,
+                            help="Optional backup timestamp for --restore (default: latest).")
+    usermind_p.set_defaults(func=cmd_usermind)
 
 
 def mem4_command(args) -> None:
@@ -179,4 +236,5 @@ def mem4_command(args) -> None:
         print("  hermes mem4 rebuild   Rebuild the FTS5 recall index from source files")
         print("  hermes mem4 eval      Run the recall A/B harness (synthetic fixture)")
         print("  hermes mem4 audit     Query the local SQLite audit store (real traffic)")
-        print("  hermes mem4 refine    Propose/apply MEMORY.md hot-zone slimming (§3)\n")
+        print("  hermes mem4 refine    Propose/apply MEMORY.md hot-zone slimming (§3)")
+        print("  hermes mem4 usermind  Propose/apply a USER mind/preference summary (§11)\n")
