@@ -147,17 +147,21 @@ class RefinePlanner:
         """回傳 (mode, preamble, sections)。動態選段落文法。"""
         lines = text.splitlines()
 
-        # 1) § 段落模式（優先）：只要出現至少一個 § 標記。code 來自 § 後的 token。
+        # 1) § 段落模式（優先）：只要出現至少一個 § 標記。code 來自 § 後的 token；
+        #    標記行 § code 之後的**同行文字是內容**（手寫 MEMORY.md 常把整條記憶
+        #    寫在 §code 那一行），必須併入 body，不能只當標題。
+        #    entry = (line_index, code_hint, inline_content, title_for_summary)
         section_entries = [
-            (i, m.group(1), m.group(2)) for i, line in enumerate(lines)
+            (i, m.group(1), m.group(2), "") for i, line in enumerate(lines)
             if (m := _SECTION_RE.match(line))
         ]
         if section_entries:
             return self._sections_from_entries(lines, section_entries, mode="section")
 
-        # 2) markdown 標題降級：至少兩個 ## 標題才值得拆。code 由標題文字衍生。
+        # 2) markdown 標題降級：至少兩個 ## 標題才值得拆。code 由標題文字衍生，
+        #    標題文字是 body 上方的標題（非內容），故 inline 為空、標題只餵摘要。
         heading_entries = [
-            (i, m.group(2), m.group(2)) for i, line in enumerate(lines)
+            (i, m.group(2), "", m.group(2)) for i, line in enumerate(lines)
             if (m := _HEADING_RE.match(line))
         ]
         if len(heading_entries) >= 2:
@@ -166,17 +170,42 @@ class RefinePlanner:
         # 3) 大小分塊降級。
         return self._sections_from_chunks(text)
 
+    @staticmethod
+    def _clean_body(text: str) -> str:
+        """清掉手寫 MEMORY.md 常見的裸 ``§`` 分隔行等噪音，讓微檔 body 乾淨。"""
+        kept = [ln for ln in text.splitlines() if ln.strip() != "§"]
+        return "\n".join(kept).strip()
+
+    def _base_code(self, code_hint: str, index: int) -> str:
+        """段落 code 的基底（未加去重後綴）；非 ascii 標題退化為 ``s<N>``。"""
+        return (normalize_code(code_hint) or normalize_code(_slugify(code_hint))
+                or f"s{index + 1}")
+
     def _sections_from_entries(self, lines, entries, *, mode) -> "tuple[str, str, List[Section]]":
-        """entries = [(line_index, code_hint, title)]，依序切段。"""
-        used: set = set()
-        preamble = "\n".join(lines[: entries[0][0]]).strip()
-        sections: List[Section] = []
-        for n, (i, code_hint, title) in enumerate(entries):
+        """entries = [(line_index, code_hint, inline_content, title)]，依序切段。
+
+        每段 body = 標記行的同行內容（inline）＋其下方到下一標記前的行（清掉裸 §
+        噪音）。同一 route code 的重複段落會**合併**成單一微檔（route code → 單檔
+        的模型才成立），依首次出現順序排列、body 依序串接。
+        """
+        preamble = self._clean_body("\n".join(lines[: entries[0][0]]))
+        order: List[str] = []
+        merged: "dict[str, list]" = {}  # code -> [title, [bodies]]
+        for n, (i, code_hint, inline, title) in enumerate(entries):
             end = entries[n + 1][0] if n + 1 < len(entries) else len(lines)
-            code = _make_code(code_hint, n, used)
-            body = "\n".join(lines[i + 1 : end]).strip()
-            summary = _summarize(body, title=title)
-            sections.append(Section(code=code, summary=summary, body=body))
+            below = self._clean_body("\n".join(lines[i + 1 : end]))
+            body = "\n".join(p for p in (inline.strip(), below) if p)
+            code = self._base_code(code_hint, n)
+            if code not in merged:
+                merged[code] = [title, []]
+                order.append(code)
+            if body:
+                merged[code][1].append(body)
+        sections: List[Section] = []
+        for code in order:
+            title, bodies = merged[code]
+            body = "\n\n".join(bodies)
+            sections.append(Section(code=code, summary=_summarize(body, title=title), body=body))
         return mode, preamble, sections
 
     def _sections_from_chunks(self, text: str) -> "tuple[str, str, List[Section]]":

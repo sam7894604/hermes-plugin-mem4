@@ -65,6 +65,44 @@ def test_plan_section_mode(tmp_path):
     assert plan.before_tokens > plan.after_tokens
 
 
+def test_duplicate_code_sections_merge(tmp_path):
+    # 手寫 MEMORY.md 常見：同一 §code 出現多次，且用裸 § 當分隔行。
+    text = (
+        "§sys 系統一\n甲設定值\n"
+        "§\n"
+        "§fam 人物\n乙\n"
+        "§\n"
+        "§sys 系統二\n丙設定值\n"
+    )
+    _write_memory(tmp_path, text)
+    plan = RefinePlanner(tmp_path).plan()
+    # 同 code 合併成單檔（route code → 單檔）；不再出現 sys-2
+    codes = [s.code for s in plan.sections]
+    assert codes == ["sys", "fam"]
+    sys_body = next(s.body for s in plan.sections if s.code == "sys")
+    assert "甲設定值" in sys_body and "丙設定值" in sys_body
+    # 裸 § 分隔行不留在 body
+    assert "§" not in sys_body
+
+
+def test_inline_content_not_lost(tmp_path):
+    # 手寫 MEMORY.md 常把整條記憶寫在 §code 那一行（inline），內容不可只進摘要。
+    text = (
+        "§fam 玄0965·毅0910·地址某處·NICU→N4\n"
+        "§\n"
+        "§sys claude-proxy·cron07:00·pip=cd venv\n"
+        "orphan 這行沒有 § 前綴但也不可遺失\n"
+        "§adr ADR018四層路由·subagent>timeout\n"
+    )
+    _write_memory(tmp_path, text)
+    plan = RefinePlanner(tmp_path).plan()
+    allbody = plan.preamble + "\n" + "\n".join(s.body for s in plan.sections)
+    # 每個 § 標記行的 inline 內容都必須落在某個 body 裡（不是被截斷進摘要）
+    for token in ["玄0965", "NICU→N4", "claude-proxy", "pip=cd venv",
+                  "orphan 這行沒有", "ADR018四層路由", "subagent>timeout"]:
+        assert token in allbody, f"content lost: {token}"
+
+
 def test_dry_run_touches_nothing(tmp_path):
     p = _write_memory(tmp_path, SECTION_MEMORY)
     original = p.read_text(encoding="utf-8")
