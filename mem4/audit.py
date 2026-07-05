@@ -259,6 +259,25 @@ class Auditor:
             baseline_inject_tokens=baseline_inject_tokens, mem4_inject_tokens=mem4_inject_tokens,
         ))
 
+    def record_refine(self, *, before_bytes: int, after_bytes: int, microfiles: int,
+                      archived: int, before_tokens: int, after_tokens: int,
+                      applied: bool) -> None:
+        """Record a MEMORY.md refine (§3 縮限式放寬 apply path).
+
+        Maps onto the existing ``audit_events`` columns (no schema change):
+        ``kind="refine"``; the paired baseline/mem4 inject tokens carry the
+        before/after MEMORY.md token estimate so ``paired_diff`` is the tokens
+        the精煉 removed from the hot zone; ``query`` stashes the microfile and
+        archive counts for offline slicing.
+        """
+        self._emit(AuditEvent(
+            ts=time.time(), session_id=self.session_id, arm=self.arm, kind="refine",
+            query=f"microfiles={microfiles} archived={archived} applied={int(applied)}"[:500],
+            tool_called="mem4_refine", hit=applied, hit_estimated=False,
+            route="refine", injected_chars=after_bytes,
+            baseline_inject_tokens=before_tokens, mem4_inject_tokens=after_tokens,
+        ))
+
     # -- reading / querying --------------------------------------------------
 
     def read_events(self) -> List[dict]:
