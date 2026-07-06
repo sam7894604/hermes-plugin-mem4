@@ -315,6 +315,16 @@ class Mem4MemoryProvider(MemoryProvider):
         except Exception as e:
             logger.debug("mem4 refine proposal refresh failed (non-fatal): %s", e)
 
+        # §3 persist — Dream④ 週期性 re-refine（把新累積的 inline entry 重新抽進 L2、
+        # 讓熱區持續保持小）。屬「週期性自動 apply」政策變更,由 refine.persist_on_dream
+        # 控制（預設 False）;啟發式優先、備份/原子/可還原、冪等（沒新內容就 no-op）。
+        try:
+            if self._resolve_refine_persist_on_dream() and (
+                    self._ran_migration or (self._dream and self._dream.enabled)):
+                self._persist_refine(hermes_home)
+        except Exception as e:
+            logger.debug("mem4 refine persist-on-dream failed (non-fatal): %s", e)
+
         # §11 Honcho 借鏡 — Dream④ 產出 USER 心智/偏好摘要(啟發式、零 LLM)。
         # 同樣只寫 mem4-owned 提案檔,**永不**回寫內建 USER.md(候選制)。
         try:
@@ -328,6 +338,31 @@ class Mem4MemoryProvider(MemoryProvider):
         """Write the latest refine proposal to a mem4-owned file. Never applies."""
         from .refine import RefinePlanner
         RefinePlanner(hermes_home, auditor=self._auditor).refresh_proposal()
+
+    def _resolve_refine_persist_on_dream(self) -> bool:
+        """memory.mem4.refine.persist_on_dream (default False — proposal-only)."""
+        cfg = self._config or {}
+        rf = cfg.get("refine") if isinstance(cfg.get("refine"), dict) else None
+        if rf is not None and "persist_on_dream" in rf:
+            return _coerce_bool(rf.get("persist_on_dream"), False)
+        try:
+            from hermes_cli.config import load_config
+
+            config = load_config()
+            memory = config.get("memory", {}) if isinstance(config, dict) else {}
+            m4 = memory.get("mem4", {}) if isinstance(memory, dict) else {}
+            rfc = m4.get("refine", {}) if isinstance(m4, dict) else {}
+            if isinstance(rfc, dict) and "persist_on_dream" in rfc:
+                return _coerce_bool(rfc.get("persist_on_dream"), False)
+        except Exception:
+            pass
+        return False
+
+    def _persist_refine(self, hermes_home) -> None:
+        """Dream④ periodic re-refine (opt-in). Idempotent: no-op if MEMORY.md
+        is unchanged since the last refine. Backup + atomic + restorable."""
+        from .refine import RefinePlanner
+        RefinePlanner(hermes_home, auditor=self._auditor).apply_if_changed()
 
     def _resolve_user_summary_enabled(self) -> bool:
         """memory.mem4.user_summary.enabled (default True — proposal-only, harmless)."""

@@ -1,33 +1,38 @@
-"""§3 縮限式放寬 — MEMORY.md 精煉（refine）：熱區縮小的提案／套用引擎。
+"""§3 縮限式放寬 — MEMORY.md 精煉（refine）：熱區縮小 + **持久化**引擎。
 
 mem4 的鐵律是「日常永不回寫內建 MEMORY.md/USER.md」（design spike §3 / §8.3）。
-本模組是那條鐵律**唯一**的、顯式的、可還原的放寬：只有使用者明確執行
-``hermes mem4 refine --apply`` 才會改寫 MEMORY.md，而且：
+本模組是那條鐵律**唯一**的、顯式的、可還原的放寬。
 
-  * 預設 ``--dry-run`` 只產出提案，不碰任何內建檔。
-  * ``--apply`` 前一定先把 MEMORY.md 備份到
-    ``$HERMES_HOME/mem4/_refine_backups/MEMORY-<UTCts>.md``；任何會被覆寫的既有
-    微檔也一併備份 —— **絕不靜默覆蓋**。
-  * 改寫用原子寫入（先寫 ``.tmp`` 再 ``os.replace``）：中途失敗則原檔零改動。
-  * ``--restore [<ts>]`` 可從備份還原 MEMORY.md。
-  * on_memory_write / Dream④ 等自動路徑**永遠**只呼叫 :meth:`refresh_proposal`
-    （寫 mem4-owned 的提案檔），從不 apply。
+## 為什麼輸出用 memory 工具原生的 ``\\n§\\n`` entry 格式（2026-07-06 修正）
 
-精煉策略 = 啟發式優先、零 LLM、零依賴：
-  1. 動態解析 MEMORY.md 的 ``§<code>`` 段落標記（不寫死段名）。
-  2. 每段抽成 ``$HERMES_HOME/mem4/<code>.md`` 的 L2 微檔。
-  3. 濃縮後的 MEMORY.md = 短標頭 + 無 § 歸屬的必要核心 + 路由索引
-     （每個 §code 一行摘要，指向對應微檔）。
-  4. 無 § 標記時降級：先用 markdown 標題分段，再無則用大小分塊。
+內建 ``tools/memory_tool.py`` 把 MEMORY.md 當成「entries 用 ``\\n§\\n`` 串接」的清單，
+啟動時載入記憶體、之後每次 add/replace **從清單整檔重寫**，且有 drift 偵測（① 用
+``\\n§\\n`` 拆再拼 ≠ 原檔，或 ② 任一 entry 超過字元上限 → 備份並拒絕寫入）。
+
+早期 refine 把 MEMORY.md 改成 markdown 索引 → memory 工具把整份索引當成 1 個不透明
+entry，一寫新記憶就從快取清單整檔重寫、把精煉成果蓋回 inline（**零持久**）。
+
+修正版：refine 輸出 = **``\\n§\\n`` 分隔的短 entry**：每個 ``§code`` 條目抽進 L2 微檔、
+換成一行「路由指標 entry」（帶 :data:`_POINTER_MARK` sentinel）；無 § 歸屬的條目原樣保留
+為核心 entry。這樣 memory 工具讀回是乾淨離散短 entry（round-trip 一致、不觸發 drift、
+各 entry < 上限），**會保留**；新記憶當新 entry 附加，Dream④ re-refine 再把新的抽走。
+如此熱區才真正持續保持小。
+
+安全：``--apply`` 前備份 MEMORY.md（時間戳、可 ``--restore``）；微檔用**合併**（不覆蓋、
+會覆寫時先備份）；原子寫入（``.tmp`` → ``os.replace``，失敗原檔零改動）。冪等：已是精煉
+態（無新 inline entry）時 re-refine 是 no-op。自動路徑預設只出提案；只有顯式 ``--apply``
+或開啟 ``refine.persist_on_dream`` 的 Dream④ 才會改寫。
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from .backend import normalize_code
 from .audit import estimate_tokens
@@ -35,54 +40,57 @@ from .audit import estimate_tokens
 #: 精煉產物落地位置（皆在 mem4-owned 樹下；內建檔不在此列）。
 BACKUP_DIRNAME = "_refine_backups"
 PROPOSAL_FILENAME = "_refine_proposal.md"
+STATE_FILENAME = "_refine_state.json"
 
-#: § 段落標記：行首（可含 0-6 個 ``#`` 與少量縮排）出現 ``§<code>``。code 取
-#: 其後的 token（字母數字起頭，可含 ``_`` ``-``）。標記行其餘文字當標題。
-_SECTION_RE = re.compile(r"^\s{0,3}#{0,6}\s*§\s*([A-Za-z0-9][A-Za-z0-9_-]*)\s*(.*)$")
+#: **必須與 tools/memory_tool.py 的 ENTRY_DELIMITER 一致。** MEMORY.md 是 memory 工具
+#: 的 entries 用此分隔符串接的清單。
+ENTRY_DELIMITER = "\n§\n"
 
-#: 降級用的 markdown 標題（## 以下；一級 # 常是整檔標題，略過）。
-_HEADING_RE = re.compile(r"^(#{2,6})\s+(.+?)\s*#*$")
+#: 路由指標 entry 的 sentinel（辨識「已抽出的指標」以達冪等；正常使用者記憶不會出現）。
+_POINTER_MARK = "⟪mem4⟫"
 
-#: 大小分塊降級時每塊的目標字元數。
-_CHUNK_CHARS = 1500
+#: 一個 ``§code content`` 條目（entry 開頭是 §code，其後為內容；內容可跨行但不含分隔符）。
+_CODED_ENTRY_RE = re.compile(r"^§\s*([A-Za-z0-9][A-Za-z0-9_-]*)\s+(.+)$", re.DOTALL)
+
+#: 摘要／指標長度上限（越短熱區越小；遠低於 memory 工具的整檔字元上限，不觸發 drift）。
+_SUMMARY_CHARS = 80
 
 
 def _slugify(text: str) -> str:
-    """把任意標題轉成 ascii route code 候選（CJK 等非 ascii 會被清成空字串）。"""
-    t = text.strip().lower()
-    t = re.sub(r"[^a-z0-9]+", "-", t).strip("-")
+    t = re.sub(r"[^a-z0-9]+", "-", text.strip().lower()).strip("-")
     return t
 
 
-def _make_code(raw: str, index: int, used: set) -> str:
-    """產生唯一且合法的 route code；非 ascii 標題退化成 ``s<N>``。"""
-    base = normalize_code(raw) or normalize_code(_slugify(raw)) or f"s{index + 1}"
-    code = base
-    n = 2
-    while code in used:
-        code = f"{base}-{n}"
-        n += 1
-    used.add(code)
-    return code
-
-
-def _summarize(body: str, title: str = "", limit: int = 80) -> str:
-    """一行摘要：優先用標記行的標題，否則取 body 首個非空行。"""
-    text = title.strip()
-    if not text:
-        for line in body.splitlines():
-            s = line.strip().lstrip("#").strip()
-            if s:
-                text = s
-                break
+def _summarize(body: str, limit: int = _SUMMARY_CHARS) -> str:
+    """一行摘要：body 首個非空行、壓成單行、截短。"""
+    text = ""
+    for line in body.splitlines():
+        s = line.strip().lstrip("#-*> ").strip()
+        if s:
+            text = s
+            break
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) > limit:
         text = text[: limit - 1].rstrip() + "…"
-    return text or "(無摘要)"
+    return text or "(見微檔)"
+
+
+def _pointer_entry(code: str, summary: str) -> str:
+    """一行路由指標 entry：``§code ⟪mem4⟫ <summary> · mem_route(code)``。
+
+    單行、含 sentinel、不含 ``\\n§\\n`` → memory 工具讀回為乾淨短 entry、可被冪等辨識。
+    """
+    return f"§{code} {_POINTER_MARK} {_summarize(summary)} · mem_route({code})"
+
+
+def _is_pointer(entry: str) -> bool:
+    return _POINTER_MARK in entry
 
 
 @dataclass
 class Section:
+    """本輪要寫進微檔的一個 code（body = 合併後的完整微檔內容，供報告/寫入）。"""
+
     code: str
     summary: str
     body: str
@@ -95,19 +103,16 @@ class Section:
 @dataclass
 class RefinePlan:
     source_exists: bool
-    mode: str  # "section" | "heading" | "chunk" | "empty"
-    preamble: str
-    sections: List[Section] = field(default_factory=list)
+    mode: str  # "entry" | "empty"
+    sections: List[Section] = field(default_factory=list)  # codes with NEW content this round
     condensed: str = ""
     before_bytes: int = 0
     after_bytes: int = 0
+    _before_text_cached: str = ""
 
     @property
     def before_tokens(self) -> int:
-        # token 估計以字元數為準（estimate_tokens 吃 char 數）。
         return estimate_tokens(len(self._before_text_cached))
-
-    _before_text_cached: str = ""
 
     @property
     def after_tokens(self) -> int:
@@ -121,6 +126,11 @@ class RefinePlan:
     def bytes_saved(self) -> int:
         return self.before_bytes - self.after_bytes
 
+    @property
+    def changed(self) -> bool:
+        """精煉輸出是否與現況不同（相同 ⇒ 已是精煉態，apply 為 no-op）。"""
+        return self.source_exists and self.condensed != self._before_text_cached
+
 
 class RefinePlanner:
     """精煉引擎。純檔案操作、無網路、無 LLM。"""
@@ -131,9 +141,10 @@ class RefinePlanner:
         self.mem4_root = self.home / "mem4"
         self.backup_dir = self.mem4_root / BACKUP_DIRNAME
         self.proposal_path = self.mem4_root / PROPOSAL_FILENAME
+        self.state_path = self.mem4_root / STATE_FILENAME
         self.auditor = auditor
 
-    # -- 解析 ---------------------------------------------------------------
+    # -- 讀取 ---------------------------------------------------------------
 
     def _read_source(self) -> Optional[str]:
         if not self.memory_path.is_file():
@@ -143,177 +154,143 @@ class RefinePlanner:
         except OSError:
             return None
 
-    def _parse(self, text: str) -> "tuple[str, str, List[Section]]":
-        """回傳 (mode, preamble, sections)。動態選段落文法。"""
-        lines = text.splitlines()
+    def _microfile_path(self, code: str) -> Path:
+        return self.mem4_root / f"{code}.md"
 
-        # 1) § 段落模式（優先）：只要出現至少一個 § 標記。code 來自 § 後的 token；
-        #    標記行 § code 之後的**同行文字是內容**（手寫 MEMORY.md 常把整條記憶
-        #    寫在 §code 那一行），必須併入 body，不能只當標題。
-        #    entry = (line_index, code_hint, inline_content, title_for_summary)
-        section_entries = [
-            (i, m.group(1), m.group(2), "") for i, line in enumerate(lines)
-            if (m := _SECTION_RE.match(line))
-        ]
-        if section_entries:
-            return self._sections_from_entries(lines, section_entries, mode="section")
-
-        # 2) markdown 標題降級：至少兩個 ## 標題才值得拆。code 由標題文字衍生，
-        #    標題文字是 body 上方的標題（非內容），故 inline 為空、標題只餵摘要。
-        heading_entries = [
-            (i, m.group(2), "", m.group(2)) for i, line in enumerate(lines)
-            if (m := _HEADING_RE.match(line))
-        ]
-        if len(heading_entries) >= 2:
-            return self._sections_from_entries(lines, heading_entries, mode="heading")
-
-        # 3) 大小分塊降級。
-        return self._sections_from_chunks(text)
+    def _read_microfile_text(self, code: str) -> str:
+        p = self._microfile_path(code)
+        if not p.is_file():
+            return ""
+        try:
+            return p.read_text(encoding="utf-8")
+        except OSError:
+            return ""
 
     @staticmethod
-    def _clean_body(text: str) -> str:
-        """清掉手寫 MEMORY.md 常見的裸 ``§`` 分隔行等噪音，讓微檔 body 乾淨。"""
-        kept = [ln for ln in text.splitlines() if ln.strip() != "§"]
-        return "\n".join(kept).strip()
-
-    def _base_code(self, code_hint: str, index: int) -> str:
-        """段落 code 的基底（未加去重後綴）；非 ascii 標題退化為 ``s<N>``。"""
-        return (normalize_code(code_hint) or normalize_code(_slugify(code_hint))
-                or f"s{index + 1}")
-
-    def _sections_from_entries(self, lines, entries, *, mode) -> "tuple[str, str, List[Section]]":
-        """entries = [(line_index, code_hint, inline_content, title)]，依序切段。
-
-        每段 body = 標記行的同行內容（inline）＋其下方到下一標記前的行（清掉裸 §
-        噪音）。同一 route code 的重複段落會**合併**成單一微檔（route code → 單檔
-        的模型才成立），依首次出現順序排列、body 依序串接。
-        """
-        preamble = self._clean_body("\n".join(lines[: entries[0][0]]))
-        order: List[str] = []
-        merged: "dict[str, list]" = {}  # code -> [title, [bodies]]
-        for n, (i, code_hint, inline, title) in enumerate(entries):
-            end = entries[n + 1][0] if n + 1 < len(entries) else len(lines)
-            below = self._clean_body("\n".join(lines[i + 1 : end]))
-            body = "\n".join(p for p in (inline.strip(), below) if p)
-            code = self._base_code(code_hint, n)
-            if code not in merged:
-                merged[code] = [title, []]
-                order.append(code)
-            if body:
-                merged[code][1].append(body)
-        sections: List[Section] = []
-        for code in order:
-            title, bodies = merged[code]
-            body = "\n\n".join(bodies)
-            sections.append(Section(code=code, summary=_summarize(body, title=title), body=body))
-        return mode, preamble, sections
-
-    def _sections_from_chunks(self, text: str) -> "tuple[str, str, List[Section]]":
-        stripped = text.strip()
-        if not stripped:
-            return "empty", "", []
-        used: set = set()
-        paras = re.split(r"\n\s*\n", stripped)
-        sections: List[Section] = []
-        buf: List[str] = []
-        size = 0
-
-        def flush():
-            nonlocal buf, size
-            if not buf:
-                return
-            body = "\n\n".join(buf).strip()
-            idx = len(sections)
-            code = _make_code(f"part{idx + 1}", idx, used)
-            sections.append(Section(code=code, summary=_summarize(body), body=body))
-            buf, size = [], 0
-
-        for p in paras:
-            buf.append(p)
-            size += len(p)
-            if size >= _CHUNK_CHARS:
-                flush()
-        flush()
-        # 分塊模式沒有「無歸屬核心」概念，全部進微檔。
-        return "chunk", "", sections
-
-    # -- 濃縮輸出 -----------------------------------------------------------
+    def _merge_microfile(existing: str, new_bodies: List[str]) -> str:
+        """把新內容併入既有微檔（依段落去重，保序）。"""
+        parts = [p.strip() for p in existing.split("\n\n")] if existing.strip() else []
+        parts = [p for p in parts if p]
+        seen = set(parts)
+        for b in new_bodies:
+            b = b.strip()
+            if b and b not in seen:
+                seen.add(b)
+                parts.append(b)
+        return "\n\n".join(parts)
 
     @staticmethod
-    def _strip_leading_h1(text: str) -> str:
-        """濃縮檔已有自己的 H1；去掉 preamble 開頭殘留的原始一級標題避免重複。"""
-        lines = text.splitlines()
-        while lines and not lines[0].strip():
-            lines.pop(0)
-        if lines and re.match(r"^\s{0,3}#\s+\S", lines[0]):
-            lines.pop(0)
-        return "\n".join(lines).strip()
+    def _code_of(raw: str) -> Optional[str]:
+        return normalize_code(raw) or normalize_code(_slugify(raw))
 
-    def _build_condensed(self, preamble: str, sections: List[Section]) -> str:
-        out = [
-            "# MEMORY.md（mem4 精煉索引）",
-            "",
-            "> 本檔已由 `hermes mem4 refine` 精煉：長段落移入 mem4 冷區微檔，"
-            "此處僅保留常駐核心與路由索引。",
-            "> 需完整內容用 `mem_route(<code>)` 讀微檔；需回復原檔用 "
-            "`hermes mem4 refine --restore`。",
-            "",
-        ]
-        core = self._strip_leading_h1(preamble)
-        if core.strip():
-            out += ["## 核心（常駐）", "", core.strip(), ""]
-        if sections:
-            out += ["## 路由索引", ""]
-            for s in sections:
-                out.append(
-                    f"- §{s.code} — {s.summary} → 微檔 `{s.code}.md`"
-                    f"（`mem_route({s.code})`）"
-                )
-            out.append("")
-        return "\n".join(out).rstrip() + "\n"
-
-    # -- 提案（dry-run 核心） ----------------------------------------------
+    # -- 解析 + 濃縮（entry 模型的核心） ------------------------------------
 
     def plan(self) -> RefinePlan:
         text = self._read_source()
         if text is None:
-            return RefinePlan(source_exists=False, mode="empty", preamble="")
-        mode, preamble, sections = self._parse(text)
-        condensed = self._build_condensed(preamble, sections) if sections else text
+            return RefinePlan(source_exists=False, mode="empty")
+
+        entries = [e.strip() for e in text.split(ENTRY_DELIMITER)]
+        entries = [e for e in entries if e]
+
+        # -- pass 1：分類每個 entry，收集各 code 的新內容與既有指標 --------------
+        # items 保序：('core', text) | ('ptr', code, text) | ('coded', code, body, text)
+        items: List[tuple] = []
+        new_bodies: Dict[str, List[str]] = {}
+        has_ptr: set = set()
+        for e in entries:
+            m = _CODED_ENTRY_RE.match(e)
+            code = self._code_of(m.group(1)) if m else None
+            if m and code:
+                if _is_pointer(e):
+                    has_ptr.add(code)
+                    items.append(("ptr", code, e))
+                else:
+                    body = m.group(2).strip()
+                    new_bodies.setdefault(code, []).append(body)
+                    items.append(("coded", code, body, e))
+            else:
+                items.append(("core", None, e))
+
+        # -- 抽取決策：**只有 pointer 比原內容短（真的省熱區）才抽**；已 cold 的 code
+        #    （有既有指標）一律把新內容併進微檔。短 §entry 保留 inline，避免越精煉越大。
+        extract: set = set()
+        for code, bodies in new_bodies.items():
+            merged_new = "\n\n".join(bodies)
+            if code in has_ptr or len(_pointer_entry(code, _summarize(bodies[0]))) < len(merged_new):
+                extract.add(code)
+
+        # -- pass 2：保序組出濃縮輸出 + 微檔清單 -------------------------------
+        order: List[tuple] = []   # ('keep', text) | ('ptr', code)
+        emitted: set = set()
+        for it in items:
+            if it[0] == "core":
+                order.append(("keep", it[2]))
+            elif it[0] == "ptr":
+                if it[1] not in emitted:   # 既有指標：原樣保留、去重
+                    emitted.add(it[1])
+                    order.append(("keep", it[2]))
+            else:  # coded
+                code, text_e = it[1], it[3]
+                if code in extract:
+                    if code not in emitted:
+                        emitted.add(code)
+                        order.append(("ptr", code))   # 這格放新指標（若無既有指標）
+                    # 已有指標或已佔格：內容併進微檔、此 entry 收掉
+                else:
+                    order.append(("keep", text_e))     # 太短、抽了不划算 → 保留 inline
+
+        sections: List[Section] = []
+        merged: Dict[str, str] = {}
+        for code in new_bodies:
+            if code not in extract:
+                continue
+            content = self._merge_microfile(self._read_microfile_text(code), new_bodies[code])
+            merged[code] = content
+            sections.append(Section(code=code, summary=_summarize(new_bodies[code][0]), body=content))
+
+        parts: List[str] = []
+        for kind, payload in order:
+            if kind == "keep":
+                parts.append(payload)
+            else:  # ptr — 只有無既有指標的 extract code 會走到（既有指標已 keep）
+                parts.append(_pointer_entry(payload, _summarize(new_bodies[payload][0])))
+        condensed = ENTRY_DELIMITER.join(parts)
+
         plan = RefinePlan(
             source_exists=True,
-            mode=mode,
-            preamble=preamble,
+            mode="entry",
             sections=sections,
             condensed=condensed,
             before_bytes=len(text.encode("utf-8")),
             after_bytes=len(condensed.encode("utf-8")),
         )
         plan._before_text_cached = text
+        # 供 apply 使用的合併內容掛在 plan 上（避免 apply 再算一次）。
+        plan._merged = merged  # type: ignore[attr-defined]
         return plan
 
     def render_plan(self, plan: RefinePlan) -> str:
         lines = ["", "mem4 refine — 精煉提案 (dry-run)", "─" * 40]
         if not plan.source_exists:
-            lines.append(f"  找不到 MEMORY.md：{self.memory_path}")
-            lines.append("")
+            lines += [f"  找不到 MEMORY.md：{self.memory_path}", ""]
             return "\n".join(lines)
-        if not plan.sections:
-            lines.append("  MEMORY.md 無可拆分的段落 —— 不需精煉。")
-            lines.append("")
+        if not plan.changed:
+            lines += ["  MEMORY.md 已是精煉態（無新 inline 內容）—— 無需精煉。", ""]
             return "\n".join(lines)
         pct = (100 * plan.bytes_saved / plan.before_bytes) if plan.before_bytes else 0
         lines += [
             f"  來源：{self.memory_path}",
-            f"  分段模式：{plan.mode}   微檔數：{plan.n_microfiles}",
+            f"  格式：memory 工具原生 \\n§\\n entry（持久化）",
+            f"  本輪抽出/更新微檔：{plan.n_microfiles}",
             f"  MEMORY.md：{plan.before_bytes} → {plan.after_bytes} bytes "
             f"（縮小 {plan.bytes_saved} bytes / {pct:.0f}%）",
             f"  token 估計：{plan.before_tokens} → {plan.after_tokens} tokens",
-            "",
-            "  將抽出的微檔：",
         ]
-        for s in plan.sections:
-            lines.append(f"    §{s.code:<12} {s.body_bytes:>6} bytes  {s.summary}")
+        if plan.sections:
+            lines += ["", "  微檔（合併後大小）："]
+            for s in plan.sections:
+                lines.append(f"    §{s.code:<12} {s.body_bytes:>6} bytes  {s.summary}")
         lines += [
             "",
             "  這是提案（dry-run），未改動任何檔案。",
@@ -323,13 +300,10 @@ class RefinePlanner:
         return "\n".join(lines)
 
     def refresh_proposal(self) -> Optional[RefinePlan]:
-        """把最新提案寫到 mem4-owned 提案檔。**永不** apply、永不碰內建檔。
-
-        由首次 bootstrap 與 Dream④ 呼叫。任何錯誤都吞掉（不得影響一輪對話）。
-        """
+        """把最新提案寫到 mem4-owned 提案檔。**永不** apply、永不碰內建檔。"""
         try:
             plan = self.plan()
-            if not plan.source_exists or not plan.sections:
+            if not plan.source_exists or not plan.changed:
                 return plan
             self.mem4_root.mkdir(parents=True, exist_ok=True)
             self.proposal_path.write_text(self.render_plan(plan), encoding="utf-8")
@@ -337,44 +311,70 @@ class RefinePlanner:
         except Exception:
             return None
 
-    # -- 套用（唯一會改寫 MEMORY.md 的路徑，需顯式 --apply） ----------------
+    # -- 狀態（hash 冪等） --------------------------------------------------
+
+    @staticmethod
+    def _hash(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def _load_state(self) -> dict:
+        if not self.state_path.is_file():
+            return {}
+        try:
+            return json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def _save_state(self, applied_hash: str) -> None:
+        try:
+            self.mem4_root.mkdir(parents=True, exist_ok=True)
+            self.state_path.write_text(
+                json.dumps({"last_applied_hash": applied_hash}, ensure_ascii=False),
+                encoding="utf-8")
+        except OSError:
+            pass
+
+    # -- 套用（唯一會改寫 MEMORY.md 的路徑） --------------------------------
 
     def _utc_stamp(self) -> str:
-        # 避免用 datetime.now()（測試/決定性考量交由呼叫端），這裡直接取檔案系統時鐘。
         from datetime import datetime, timezone
         return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
     def apply(self, plan: Optional[RefinePlan] = None) -> dict:
-        """備份 → 寫微檔 → 原子改寫 MEMORY.md。失敗則原檔零改動。"""
+        """備份 → 合併寫微檔 → 原子改寫 MEMORY.md。失敗則原檔零改動。"""
         plan = plan or self.plan()
         if not plan.source_exists:
             return {"applied": False, "reason": "no MEMORY.md"}
-        if not plan.sections:
-            return {"applied": False, "reason": "nothing to refine"}
+        if not plan.changed:
+            # 已是精煉態：把 hash 記下（讓 apply_if_changed 快取），視為 no-op。
+            self._save_state(self._hash(plan._before_text_cached))
+            return {"applied": False, "reason": "already refined (no-op)"}
 
         self.mem4_root.mkdir(parents=True, exist_ok=True)
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         stamp = self._utc_stamp()
 
-        # 1) 備份 MEMORY.md（第一優先，任何後續失敗都留有原檔）。
+        # 1) 備份 MEMORY.md（第一優先）。
         backup_path = self.backup_dir / f"MEMORY-{stamp}.md"
         backup_path.write_text(plan._before_text_cached, encoding="utf-8")
 
-        # 2) 寫微檔；會覆寫既有微檔時先備份到同一時戳目錄 —— 絕不靜默覆蓋。
+        # 2) 合併寫微檔；內容有變的既有微檔先備份 —— 絕不靜默覆蓋。
+        merged: Dict[str, str] = getattr(plan, "_merged", {})
         overwritten = 0
         mf_backup_dir = self.backup_dir / f"microfiles-{stamp}"
         for s in plan.sections:
-            target = self.mem4_root / f"{s.code}.md"
+            content = merged.get(s.code, s.body)
+            target = self._microfile_path(s.code)
             if target.is_file():
                 try:
                     old = target.read_text(encoding="utf-8")
                 except OSError:
                     old = ""
-                if old.strip() != s.body.strip():
+                if old.strip() != content.strip():
                     mf_backup_dir.mkdir(parents=True, exist_ok=True)
                     (mf_backup_dir / f"{s.code}.md").write_text(old, encoding="utf-8")
                     overwritten += 1
-            target.write_text(s.body, encoding="utf-8")
+            target.write_text(content, encoding="utf-8")
 
         # 3) 原子改寫 MEMORY.md（tmp → os.replace）；失敗清 tmp、原檔不動。
         tmp = self.memory_path.with_suffix(".md.refine-tmp")
@@ -389,12 +389,12 @@ class RefinePlanner:
             return {"applied": False, "reason": f"atomic write failed: {e}",
                     "backup": str(backup_path)}
 
-        archived = 1 + overwritten  # MEMORY.md + 被覆寫的微檔
+        self._save_state(self._hash(plan.condensed))
         if self.auditor is not None:
             try:
                 self.auditor.record_refine(
                     before_bytes=plan.before_bytes, after_bytes=plan.after_bytes,
-                    microfiles=plan.n_microfiles, archived=archived,
+                    microfiles=plan.n_microfiles, archived=1 + overwritten,
                     before_tokens=plan.before_tokens, after_tokens=plan.after_tokens,
                     applied=True,
                 )
@@ -411,6 +411,22 @@ class RefinePlanner:
             "stamp": stamp,
         }
 
+    def apply_if_changed(self) -> dict:
+        """Dream④ 週期性 re-refine 用：只有 MEMORY.md 自上次精煉後有變才 apply。
+
+        hash 快取先擋（沒變就 no-op、零解析）；再以 plan.changed 為準。
+        """
+        text = self._read_source()
+        if text is None:
+            return {"applied": False, "reason": "no MEMORY.md"}
+        if self._load_state().get("last_applied_hash") == self._hash(text):
+            return {"applied": False, "reason": "unchanged since last refine"}
+        plan = self.plan()
+        if not plan.changed:
+            self._save_state(self._hash(text))
+            return {"applied": False, "reason": "already refined (no-op)"}
+        return self.apply(plan)
+
     # -- 還原 ---------------------------------------------------------------
 
     def list_backups(self) -> List[Path]:
@@ -419,7 +435,6 @@ class RefinePlanner:
         return sorted(self.backup_dir.glob("MEMORY-*.md"))
 
     def restore(self, ts: Optional[str] = None) -> dict:
-        """從備份還原 MEMORY.md。ts 省略時取最新。"""
         backups = self.list_backups()
         if not backups:
             return {"restored": False, "reason": "no backups found"}
@@ -445,4 +460,6 @@ class RefinePlanner:
             except OSError:
                 pass
             return {"restored": False, "reason": f"atomic write failed: {e}"}
+        # 還原後清掉 last_applied_hash（下次 Dream 會依現況重新判斷）。
+        self._save_state("")
         return {"restored": True, "from": str(src)}

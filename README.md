@@ -68,6 +68,12 @@ memory:
       microfile_chars: 500   # per-microfile inject cap — matched cold-tier L2 microfiles
                              # are surfaced fuller (not a 240-char snippet) and ranked first,
                              # so a weak model gets cold facts WITHOUT calling mem_route
+    refine:
+      persist_on_dream: false  # opt-in: Dream④ periodically re-refines MEMORY.md so the
+                               # hot zone stays small (idempotent, backup+restore). Off = proposal-only.
+    user_summary:
+      enabled: true            # §11 USER mind-summary proposal generation
+      mode: heuristic          # heuristic | llm
     audit:
       enabled: false         # opt-in: log one JSONL line per recall/route event
     arm: experiment          # experiment | baseline (see Measurement)
@@ -157,9 +163,13 @@ hermes mem4 refine --apply         # backup → extract microfiles → atomicall
 hermes mem4 refine --restore [ts]  # restore MEMORY.md from a backup (latest if ts omitted)
 ```
 
-The one **explicit, reversible** exception to the "never write the built-in `MEMORY.md`" rule. It parses the `§<code>` sections of `MEMORY.md` (heuristic-only, zero LLM, zero deps), extracts each into an `$HERMES_HOME/mem4/<code>.md` cold-tier microfile, and condenses `MEMORY.md` to a short header + un-attributed core + a routing index — measurably shrinking the always-loaded hot zone.
+The one **explicit, reversible** exception to the "never write the built-in `MEMORY.md`" rule. Each `§<code>` memory entry is extracted into an `$HERMES_HOME/mem4/<code>.md` cold-tier microfile and replaced by a one-line routing pointer — measurably shrinking the always-loaded hot zone (heuristic-only, zero LLM, zero deps). Short entries whose pointer wouldn't be smaller are left inline, so refine **never grows** `MEMORY.md`.
 
-Safety guarantees: the daily `on_memory_write` path **never** writes back (unchanged); the auto paths (first bootstrap, Dream④) only refresh a proposal at `mem4/_refine_proposal.md` and **never** apply; `--apply` backs up `MEMORY.md` to `mem4/_refine_backups/MEMORY-<UTCts>.md` first, never silently overwrites an existing microfile (backs it up too), writes atomically (`.tmp` → `os.replace`; on failure the original is untouched), and is fully reversible with `--restore`. Falls back to markdown headings, then size-chunking, when no `§` markers exist. See [`docs/refine-section3-policy.md`](docs/refine-section3-policy.md).
+**Native format = persistent.** The output is the built-in memory tool's own on-disk format (entries joined by `\n§\n`), so the tool reads the pointers back as clean discrete entries and **preserves them** instead of clobbering the refinement on its next write. (An earlier markdown-index format was overwritten within one memory write — the tool owns `MEMORY.md`, rewrites it from its entry list on every add, and has a drift check refine now round-trips cleanly through.)
+
+**Persistence (`refine.persist_on_dream`, default false).** With it on, Dream④ periodically **re-refines**: new inline `§code` entries the agent accumulated are extracted to microfiles and turned into pointers, keeping the hot zone small over time. Idempotent (no-op via content-hash when `MEMORY.md` is unchanged since the last refine); existing pointers are recognised and never re-extracted.
+
+Safety: the daily `on_memory_write` path **never** writes back; without `persist_on_dream`, the auto paths only refresh a proposal at `mem4/_refine_proposal.md` and **never** apply. `--apply` (and Dream persist) back up `MEMORY.md` to `mem4/_refine_backups/MEMORY-<UTCts>.md` first, **merge** into existing microfiles (backing up any pre-merge original — never silent loss), write atomically (`.tmp` → `os.replace`; original untouched on failure), and are fully reversible with `--restore`. See [`docs/refine-section3-policy.md`](docs/refine-section3-policy.md).
 
 ---
 
