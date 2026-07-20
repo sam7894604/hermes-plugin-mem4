@@ -371,11 +371,19 @@ class Mem4MemoryProvider(MemoryProvider):
         RefinePlanner(hermes_home, auditor=self._auditor).apply_if_changed()
 
     def _resolve_user_summary_enabled(self) -> bool:
-        """memory.mem4.user_summary.enabled (default True — proposal-only, harmless)."""
+        """memory.mem4.user_summary.enabled — **default False (disabled)**.
+
+        Cut in the v2 iteration: the heuristic usermind produced noise (it scraped
+        image-caption turns as "preferences") and its output was never applied,
+        while the good USER.md is maintained by the built-in memory tool. The code
+        and the manual `hermes mem4 usermind` CLI are kept (git history / opt-in),
+        but the automatic Dream-path summary no longer runs unless a user
+        explicitly sets ``user_summary.enabled: true``.
+        """
         cfg = self._config or {}
         us = cfg.get("user_summary") if isinstance(cfg.get("user_summary"), dict) else None
         if us is not None and "enabled" in us:
-            return _coerce_bool(us.get("enabled"), True)
+            return _coerce_bool(us.get("enabled"), False)
         try:
             from hermes_cli.config import load_config
 
@@ -384,10 +392,10 @@ class Mem4MemoryProvider(MemoryProvider):
             m4 = memory.get("mem4", {}) if isinstance(memory, dict) else {}
             uscfg = m4.get("user_summary", {}) if isinstance(m4, dict) else {}
             if isinstance(uscfg, dict) and "enabled" in uscfg:
-                return _coerce_bool(uscfg.get("enabled"), True)
+                return _coerce_bool(uscfg.get("enabled"), False)
         except Exception:
             pass
-        return True
+        return False
 
     def _resolve_user_summary_mode(self) -> str:
         """memory.mem4.user_summary.mode: heuristic | llm (default heuristic)."""
@@ -1024,6 +1032,16 @@ class Mem4MemoryProvider(MemoryProvider):
         except Exception as e:
             logger.debug("mem4 sync_turn index failed (non-fatal): %s", e)
 
+        # ④ Dream — a completed turn is weak "new material" signal. Counting
+        # turns (not just the rare built-in memory writes) is what lets the
+        # consolidation threshold actually be reached during normal use, so the
+        # "定期做夢整理" (principle ④) genuinely fires. Non-fatal, never blocks.
+        if self._dream:
+            try:
+                self._dream.record_signal(1)
+            except Exception:
+                pass
+
     # -- ① recall: rebuild (fifth non-negotiable guarantee) ------------------
 
     def rebuild(self) -> Dict[str, int]:
@@ -1066,6 +1084,15 @@ class Mem4MemoryProvider(MemoryProvider):
         # the direct benefit of ⑤). Free text only.
         if not self._active or self._backend is None:
             return ""
+        # ④ Dream — compression means a large batch of new material has
+        # accumulated: a natural, cost-aligned moment to consolidate mem4-owned
+        # L2/L3 (principle ④). The trigger gate still applies (idle/threshold/
+        # staleness), so this is cheap when there is nothing to do. Non-fatal.
+        if self._dream:
+            try:
+                self._dream.maybe_consolidate("pre_compress")
+            except Exception as e:
+                logger.debug("mem4 dream (pre_compress) failed (non-fatal): %s", e)
         legend = (
             "mem4 路由碼：§sys 系統 · §fam 人物 · §vlt 知識 · §adr 決策 · "
             "§proto 協定；用 mem_route(code) 按需讀冷區微檔。"

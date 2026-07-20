@@ -196,3 +196,63 @@ def test_provider_session_end_idle_skips(tmp_path):
     provider.on_session_end([])
 
     assert not (tmp_path / "mem4" / ".dream_state.json").exists()
+
+
+# -- bootstrap + turn-signal + pre_compress (the fix: Dream really fires) -----
+
+def test_bootstrap_staleness_fires_first_consolidation(tmp_path):
+    # Never consolidated before, but a pending signal has been waiting > staleness.
+    # The old code required last_consolidation_at to be set → could never bootstrap.
+    root = tmp_path / "mem4"
+    root.mkdir()
+    _seed_mirror(root, "memory", ["a", "a"])
+    dp = DreamProcessor(root, enabled=True, threshold=10, staleness_days=7)
+    dp.save(DreamState(
+        signals_since_last=1,
+        pending_since=(NOW - timedelta(days=8)).isoformat(),
+    ))
+    res = dp.maybe_consolidate("session_start", now=NOW)
+    assert res.ran is True and res.reason == "staleness"
+    st = dp.load()
+    assert st.consolidation_count == 1
+    assert st.pending_since is None and st.signals_since_last == 0
+
+
+def test_record_signal_stamps_pending_since(tmp_path):
+    root = tmp_path / "mem4"
+    root.mkdir()
+    dp = DreamProcessor(root, enabled=True, threshold=25, staleness_days=7)
+    dp.record_signal(1)
+    assert dp.load().pending_since is not None
+
+
+def test_provider_turns_then_session_end_consolidates(tmp_path):
+    # Turns (not just rare memory writes) accumulate the signal; a boundary event
+    # then fires the consolidation — this is what makes "定期做夢整理" actually run.
+    provider = Mem4MemoryProvider({
+        "backend": "local-file",
+        "dream": {"enabled": True, "threshold": 3, "staleness_days": 7},
+        "audit": {"enabled": False},
+    })
+    provider.initialize("s1", hermes_home=str(tmp_path))
+    for i in range(3):
+        provider.sync_turn(f"這是第 {i} 個測試對話輪次，內容夠長可被索引", "好的收到")
+    st = json.loads((tmp_path / "mem4" / ".dream_state.json").read_text(encoding="utf-8"))
+    assert st["signals_since_last"] == 3            # turns fed the signal
+    provider.on_session_end([])                     # boundary → threshold met
+    st = json.loads((tmp_path / "mem4" / ".dream_state.json").read_text(encoding="utf-8"))
+    assert st["consolidation_count"] >= 1 and st["signals_since_last"] == 0
+
+
+def test_provider_pre_compress_triggers_consolidation(tmp_path):
+    provider = Mem4MemoryProvider({
+        "backend": "local-file",
+        "dream": {"enabled": True, "threshold": 2, "staleness_days": 7},
+        "audit": {"enabled": False},
+    })
+    provider.initialize("s1", hermes_home=str(tmp_path))
+    provider.sync_turn("第一個對話輪次內容夠長可索引", "回覆一")
+    provider.sync_turn("第二個對話輪次內容夠長可索引", "回覆二")
+    provider.on_pre_compress([])                    # compression = consolidate moment
+    st = json.loads((tmp_path / "mem4" / ".dream_state.json").read_text(encoding="utf-8"))
+    assert st["consolidation_count"] >= 1

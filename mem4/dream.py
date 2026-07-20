@@ -77,6 +77,11 @@ class DreamState:
     last_consolidation_at: Optional[str] = None
     consolidation_count: int = 0
     signals_since_last: int = 0
+    #: When the current batch of pending signals first accrued. Drives the
+    #: staleness floor for the FIRST consolidation too (bootstrap): a never-yet-
+    #: consolidated store measures overdue-ness from here, not from a
+    #: last_consolidation_at that does not exist yet.
+    pending_since: Optional[str] = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "DreamState":
@@ -84,6 +89,7 @@ class DreamState:
             last_consolidation_at=d.get("last_consolidation_at"),
             consolidation_count=int(d.get("consolidation_count", 0)),
             signals_since_last=int(d.get("signals_since_last", 0)),
+            pending_since=d.get("pending_since"),
         )
 
     def to_dict(self) -> dict:
@@ -91,6 +97,7 @@ class DreamState:
             "last_consolidation_at": self.last_consolidation_at,
             "consolidation_count": self.consolidation_count,
             "signals_since_last": self.signals_since_last,
+            "pending_since": self.pending_since,
         }
 
 
@@ -138,11 +145,19 @@ class DreamProcessor:
         )
 
     def record_signal(self, n: int = 1) -> None:
-        """Accumulate new-material signal (called on each built-in memory write)."""
+        """Accumulate new-material signal.
+
+        Called on each built-in memory write AND on each indexed conversation
+        turn (the write-only signal was far too sparse to ever reach the
+        threshold — v2 finding). Stamps ``pending_since`` the moment signals
+        start accruing so the staleness floor can bootstrap the first run.
+        """
         if not self.enabled or n <= 0:
             return
         state = self.load()
         state.signals_since_last += n
+        if state.signals_since_last > 0 and not state.pending_since:
+            state.pending_since = _now().isoformat()
         self.save(state)
 
     # -- trigger decision ----------------------------------------------------
@@ -154,15 +169,22 @@ class DreamProcessor:
         # Event / threshold.
         if state.signals_since_last >= self.threshold:
             return True, "threshold"
-        # Staleness floor (needs a baseline — the first consolidation is
-        # threshold-driven; staleness governs cadence thereafter).
-        if state.last_consolidation_at:
+        # Staleness floor. Measured from ``pending_since`` (when the current
+        # pending signals first accrued) with a fallback to last_consolidation_at.
+        # Using pending_since means the FIRST consolidation can fire on staleness
+        # too — fixing the old chicken-and-egg where staleness needed a prior
+        # consolidation that could never happen (v2 finding, principle ④).
+        ref = state.pending_since or state.last_consolidation_at
+        if ref:
             try:
-                last = datetime.fromisoformat(state.last_consolidation_at)
+                ref_dt = datetime.fromisoformat(ref)
             except ValueError:
-                last = None
-            if last is not None and (now - last) >= self.staleness:
-                return True, "staleness"
+                ref_dt = None
+            if ref_dt is not None:
+                if ref_dt.tzinfo is None:
+                    ref_dt = ref_dt.replace(tzinfo=timezone.utc)
+                if (now - ref_dt) >= self.staleness:
+                    return True, "staleness"
         return False, "below threshold, within staleness window"
 
     def maybe_consolidate(self, reason: str, *, now: Optional[datetime] = None) -> DreamResult:
@@ -184,6 +206,7 @@ class DreamProcessor:
             state.last_consolidation_at = now.isoformat()
             state.consolidation_count += 1
             state.signals_since_last = 0
+            state.pending_since = None
             self.save(state)
             logger.info("mem4 Dream consolidated (reason=%s, why=%s, targets=%s)",
                         reason, why, targets)

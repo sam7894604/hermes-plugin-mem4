@@ -264,6 +264,19 @@ def test_cli_usermind_llm_mode(tmp_path, monkeypatch, capsys):
     assert not (tmp_path / "memories" / "USER.md").exists()  # dry-run, proposal only
 
 
+def test_auto_usermind_disabled_by_default(tmp_path):
+    # v2 cut: the automatic Dream-path usermind is OFF unless explicitly enabled.
+    _memories(tmp_path)
+    prov = Mem4MemoryProvider({"backend": "local-file"})
+    prov.initialize("s1", hermes_home=str(tmp_path))
+    assert prov._resolve_user_summary_enabled() is False
+    # explicit opt-in still honoured
+    prov_on = Mem4MemoryProvider(
+        {"backend": "local-file", "user_summary": {"enabled": True}})
+    prov_on.initialize("s2", hermes_home=str(tmp_path))
+    assert prov_on._resolve_user_summary_enabled() is True
+
+
 def test_provider_dream_refreshes_user_summary_proposal(tmp_path):
     _memories(tmp_path)
     user = tmp_path / "memories" / "USER.md"
