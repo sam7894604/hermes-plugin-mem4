@@ -139,6 +139,19 @@ def cmd_refine(args) -> None:
             print(f"  未套用：{result.get('reason')}\n")
 
 
+def cmd_doctor(args) -> None:
+    """C-⑤ — read-only health check across every mem4 component.
+
+    Surfaces silent-idle failure modes (Dream never fired, refine idle, empty
+    recall) as visible, warnable facts. Never writes, never a network call.
+    """
+    from hermes_constants import get_hermes_home
+    _ensure_importable()
+    from mem4.doctor import collect, format_report
+
+    print(format_report(collect(get_hermes_home())))
+
+
 def cmd_usermind(args) -> None:
     """§11 — Dream USER 心智/偏好摘要(啟發式、零 LLM)。
 
@@ -229,6 +242,11 @@ def register_cli(subparser) -> None:
         help="Query the local SQLite audit store (real-traffic measurement).",
     )
     audit_p.set_defaults(func=cmd_audit)
+    doctor_p = sub.add_parser(
+        "doctor",
+        help="Health check every component (recall/prefetch/refine/dream); warns on idle.",
+    )
+    doctor_p.set_defaults(func=cmd_doctor)
     refine_p = sub.add_parser(
         "refine",
         help="Refine (縮限式放寬) MEMORY.md: propose/apply hot-zone slimming.",
@@ -267,5 +285,6 @@ def mem4_command(args) -> None:
         print("  hermes mem4 rebuild   Rebuild the FTS5 recall index from source files")
         print("  hermes mem4 eval      Run the recall A/B harness (synthetic fixture)")
         print("  hermes mem4 audit     Query the local SQLite audit store (real traffic)")
+        print("  hermes mem4 doctor    Health-check every component; warn on silent idle")
         print("  hermes mem4 refine    Propose/apply MEMORY.md hot-zone slimming (§3)")
         print("  hermes mem4 usermind  Propose/apply a USER mind/preference summary (§11)\n")
