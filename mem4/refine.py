@@ -55,6 +55,26 @@ _CODED_ENTRY_RE = re.compile(r"^§\s*([A-Za-z0-9][A-Za-z0-9_-]*)\s+(.+)$", re.DO
 #: 摘要／指標長度上限（越短熱區越小；遠低於 memory 工具的整檔字元上限，不觸發 drift）。
 _SUMMARY_CHARS = 80
 
+# ---------------------------------------------------------------------------
+# C-② 保存導向候選器（heuristic，確定性、無 LLM）
+# ---------------------------------------------------------------------------
+# 第0步結論:熱區只占 context ~0.1%、無 token 壓力,所以 refine 不做激進壓縮。
+# 目的是「保存導向」——當 MEMORY.md 逼近字數上限、memory 工具為塞新內容而刪舊條目
+# 時,先把冷細節抽進可檢索的 L2 微檔,避免永久流失。因此觸發保守:平時只抽失控的
+# 超長條目(防無限膨脹),接近上限才積極抽,且每輪抽取數有上限、絕不讓熱區變大。
+
+#: 內建 memory 工具的 MEMORY.md 字元上限(memory.memory_char_limit,預設 2200)。
+DEFAULT_MEMORY_CHAR_LIMIT = 2200
+#: 填充率 ≥ 此值 ⇒ 進入「積極保存」模式(接近上限、模型快要開始驅逐舊條目)。
+REFINE_AGGRESSIVE_FILL = 0.80
+#: 平時(填充率低)只抽「失控超長」的核心條目,單純防無限膨脹。
+PROMOTE_MIN_CHARS_PASSIVE = 300
+#: 接近上限時,抽取門檻放寬到中長條目,以在驅逐前保存它們。
+PROMOTE_MIN_CHARS_AGGRESSIVE = 140
+#: 每輪最多抽取的核心條目數(保守、避免一次重構整個熱區)。
+MAX_PROMOTIONS_PASSIVE = 1
+MAX_PROMOTIONS_AGGRESSIVE = 3
+
 
 def _slugify(text: str) -> str:
     t = re.sub(r"[^a-z0-9]+", "-", text.strip().lower()).strip("-")
@@ -108,6 +128,9 @@ class RefinePlan:
     condensed: str = ""
     before_bytes: int = 0
     after_bytes: int = 0
+    promoted: List[str] = field(default_factory=list)  # C-② core→L2 preserved this round
+    fill_ratio: float = 0.0                            # MEMORY.md chars / char_limit
+    aggressive: bool = False                           # near cap ⇒ active preservation
     _before_text_cached: str = ""
 
     @property
@@ -135,7 +158,7 @@ class RefinePlan:
 class RefinePlanner:
     """精煉引擎。純檔案操作、無網路、無 LLM。"""
 
-    def __init__(self, hermes_home, *, auditor=None):
+    def __init__(self, hermes_home, *, auditor=None, char_limit=None):
         self.home = Path(hermes_home)
         self.memory_path = self.home / "memories" / "MEMORY.md"
         self.mem4_root = self.home / "mem4"
@@ -143,6 +166,69 @@ class RefinePlanner:
         self.proposal_path = self.mem4_root / PROPOSAL_FILENAME
         self.state_path = self.mem4_root / STATE_FILENAME
         self.auditor = auditor
+        #: Built-in MEMORY.md char cap — the C-② preservation trigger reference.
+        self.char_limit = int(char_limit) if char_limit else self._resolve_char_limit()
+
+    @staticmethod
+    def _resolve_char_limit() -> int:
+        """Read ``memory.memory_char_limit`` (default 2200). No network."""
+        try:
+            from hermes_cli.config import load_config
+            config = load_config()
+            memory = config.get("memory", {}) if isinstance(config, dict) else {}
+            v = memory.get("memory_char_limit")
+            if v:
+                return int(v)
+        except Exception:
+            pass
+        return DEFAULT_MEMORY_CHAR_LIMIT
+
+    # -- C-② heuristic candidate selection (deterministic, no LLM) -----------
+
+    def _gen_code(self, entry: str, used: set) -> str:
+        """Deterministic route code for a promoted core entry.
+
+        Prefers a readable ASCII slug from the entry's summary; for CJK-only
+        entries (``_slugify`` yields nothing) falls back to a stable content-hash
+        code ``m<6hex>`` so re-running is idempotent. Deduped against codes
+        already in use this round.
+        """
+        base = normalize_code(_slugify(_summarize(entry))[:20].strip("-"))
+        cand = base or ("m" + hashlib.sha1(entry.encode("utf-8")).hexdigest()[:6])
+        code = cand
+        i = 2
+        while code in used:
+            code = f"{cand}-{i}"
+            i += 1
+        used.add(code)
+        return code
+
+    def _select_core_promotions(self, core_texts: List[str], aggressive: bool,
+                                used: set) -> Dict[str, str]:
+        """Pick which un-coded core entries to preserve into L2 this round.
+
+        Deterministic heuristic: length-gated (only entries long enough that a
+        pointer is strictly shorter — never grows the hot zone), longest-first,
+        capped per run. The gate is *conservative* off the hot path: passive when
+        the hot zone has room, active only near the char cap (preservation before
+        the memory tool evicts). Returns ``{entry_text: code}`` (insertion order).
+        """
+        min_chars = PROMOTE_MIN_CHARS_AGGRESSIVE if aggressive else PROMOTE_MIN_CHARS_PASSIVE
+        max_n = MAX_PROMOTIONS_AGGRESSIVE if aggressive else MAX_PROMOTIONS_PASSIVE
+        cands = sorted((e for e in core_texts if len(e) >= min_chars),
+                       key=len, reverse=True)
+        out: Dict[str, str] = {}
+        for e in cands:
+            if len(out) >= max_n:
+                break
+            code = self._gen_code(e, used)
+            # Hard invariant: only promote if the pointer is strictly shorter than
+            # the entry — refine must NEVER grow the hot zone.
+            if len(_pointer_entry(code, _summarize(e))) < len(e):
+                out[e] = code
+            else:
+                used.discard(code)
+        return out
 
     # -- 讀取 ---------------------------------------------------------------
 
@@ -212,6 +298,16 @@ class RefinePlanner:
             else:
                 items.append(("core", None, e))
 
+        # -- C-② 保存導向候選器：把「值得抽進 L2 保存」的核心條目升級為可抽取的 code。
+        #    觸發保守:填充率 < 0.80 只抽失控超長條目;接近上限才積極抽以在驅逐前保存。
+        fill_ratio = (len(text) / self.char_limit) if self.char_limit else 0.0
+        aggressive = fill_ratio >= REFINE_AGGRESSIVE_FILL
+        used_codes: set = set(new_bodies) | set(has_ptr)
+        core_texts = [it[2] for it in items if it[0] == "core"]
+        promote = self._select_core_promotions(core_texts, aggressive, used_codes)
+        for e_text, code in promote.items():
+            new_bodies.setdefault(code, []).append(e_text)
+
         # -- 抽取決策：**只有 pointer 比原內容短（真的省熱區）才抽**；已 cold 的 code
         #    （有既有指標）一律把新內容併進微檔。短 §entry 保留 inline，避免越精煉越大。
         extract: set = set()
@@ -225,7 +321,14 @@ class RefinePlanner:
         emitted: set = set()
         for it in items:
             if it[0] == "core":
-                order.append(("keep", it[2]))
+                # C-② promoted core entry → emit a routing pointer; else keep inline.
+                code = promote.get(it[2])
+                if code is not None:
+                    if code not in emitted:
+                        emitted.add(code)
+                        order.append(("ptr", code))
+                else:
+                    order.append(("keep", it[2]))
             elif it[0] == "ptr":
                 if it[1] not in emitted:   # 既有指標：原樣保留、去重
                     emitted.add(it[1])
@@ -264,6 +367,9 @@ class RefinePlanner:
             condensed=condensed,
             before_bytes=len(text.encode("utf-8")),
             after_bytes=len(condensed.encode("utf-8")),
+            promoted=list(promote.values()),
+            fill_ratio=fill_ratio,
+            aggressive=aggressive,
         )
         plan._before_text_cached = text
         # 供 apply 使用的合併內容掛在 plan 上（避免 apply 再算一次）。
@@ -279,10 +385,13 @@ class RefinePlanner:
             lines += ["  MEMORY.md 已是精煉態（無新 inline 內容）—— 無需精煉。", ""]
             return "\n".join(lines)
         pct = (100 * plan.bytes_saved / plan.before_bytes) if plan.before_bytes else 0
+        mode = "積極保存(接近上限)" if plan.aggressive else "被動(防膨脹)"
         lines += [
             f"  來源：{self.memory_path}",
             f"  格式：memory 工具原生 \\n§\\n entry（持久化）",
-            f"  本輪抽出/更新微檔：{plan.n_microfiles}",
+            f"  熱區填充：{plan.fill_ratio:.0%}（上限 {self.char_limit} 字）· 模式：{mode}",
+            f"  本輪抽出/更新微檔：{plan.n_microfiles}"
+            + (f"（其中保存抽取核心條目 {len(plan.promoted)}）" if plan.promoted else ""),
             f"  MEMORY.md：{plan.before_bytes} → {plan.after_bytes} bytes "
             f"（縮小 {plan.bytes_saved} bytes / {pct:.0f}%）",
             f"  token 估計：{plan.before_tokens} → {plan.after_tokens} tokens",
