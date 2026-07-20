@@ -57,6 +57,7 @@ from .dream import (
 )
 from .recall import RecallStore
 from .audit import Auditor, AUDIT_DB_FILENAME
+from . import gate
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +209,11 @@ class Mem4MemoryProvider(MemoryProvider):
         # §11 optional LLM: host-owned facade captured at register() (ctx.llm).
         # None ⇒ usermind stays pure-heuristic. Reuses the user's active model.
         self._plugin_llm = None
+        # C-① prefetch gating: cache of L0 (MEMORY.md+USER.md) term set for the
+        # dedup gate, keyed on the two files' (mtime,size) signature so it is
+        # recomputed only when the hot zone actually changes.
+        self._l0_terms_cache: Optional[set] = None
+        self._l0_terms_sig: Optional[tuple] = None
 
     # -- identity ------------------------------------------------------------
 
@@ -847,6 +853,12 @@ class Mem4MemoryProvider(MemoryProvider):
         if not query or len(query.strip()) < _MIN_INDEX_LEN:
             return ""
         q = query.strip()
+        # C-① non-text/envelope gate: image/document/background-process turns
+        # carry no real query — replaying memory on them is pure waste. Skip
+        # deterministically before any search (mirrors the _MIN_INDEX_LEN early
+        # return: no injection, no audit event).
+        if gate.is_low_signal_query(q):
+            return ""
         # Over-fetch a candidate pool so microfiles can be promoted even when
         # turn snippets crowd the top ranks; then partition by tier.
         pool = max(self._prefetch_limit * 3, self._prefetch_limit)
@@ -856,7 +868,8 @@ class Mem4MemoryProvider(MemoryProvider):
             logger.debug("mem4 prefetch failed (non-fatal): %s", e)
             return ""
 
-        text, n_micro = self._compose_prefetch(hits)
+        # C-① relevance + L0-dedup gates applied inside _compose_prefetch.
+        text, n_micro = self._compose_prefetch(hits, query=q, l0_terms=self._l0_terms())
         if self._auditor is not None:
             _b, _m = self._paired_tokens(len(text))
             # Encode microfiles-surfaced count in the (otherwise empty) prefetch
@@ -871,14 +884,21 @@ class Mem4MemoryProvider(MemoryProvider):
                 pass
         return text
 
-    def _compose_prefetch(self, hits) -> Tuple[str, int]:
+    def _compose_prefetch(self, hits, query=None, l0_terms=None) -> Tuple[str, int]:
         """Assemble prefetch text from recall hits, microfiles first & fuller.
 
         Returns ``(text, n_microfiles_surfaced)``. Microfile hits are deduped by
         route code and injected up to ``self._microfile_chars`` each (their full
         curated content, not a 240-char snippet); conversation-turn hits keep the
         short snippet. The whole block is capped at ``self._prefetch_cap``.
+
+        C-① gating: when ``query`` is given, each hit must clear a deterministic
+        relevance bar (fraction of query terms it actually contains) and must not
+        be redundant with the L0 hot zone (``l0_terms``). Both gates are skipped
+        when ``query`` is None, preserving the pre-C-① behaviour for direct
+        callers/tests.
         """
+        gate_l0 = l0_terms or set()
         micro_lines: List[str] = []
         turn_lines: List[str] = []
         seen_codes: set = set()
@@ -888,15 +908,25 @@ class Mem4MemoryProvider(MemoryProvider):
                 code = self._microfile_code(h.ref)
                 if code in seen_codes:
                     continue
-                seen_codes.add(code)
                 content = self._read_microfile_content(h.ref) or h.snippet
                 content = content.strip().replace("\n", " ")
+                if query is not None:
+                    keep, _reason = gate.gate_hit(
+                        query, content, is_microfile=True, l0_terms=gate_l0)
+                    if not keep:
+                        continue
+                seen_codes.add(code)
                 if self._microfile_chars and len(content) > self._microfile_chars:
                     content = content[: self._microfile_chars].rstrip() + "…"
                 label = f"§{code}" if code else "microfile"
                 micro_lines.append(f"- ({label}) {content}")
                 n_micro += 1
             else:
+                if query is not None:
+                    keep, _reason = gate.gate_hit(
+                        query, h.snippet, is_microfile=False, l0_terms=gate_l0)
+                    if not keep:
+                        continue
                 turn_lines.append(f"- (turn) {h.snippet}")
         if not micro_lines and not turn_lines:
             return "", 0
@@ -930,6 +960,33 @@ class Mem4MemoryProvider(MemoryProvider):
         except Exception:
             return None
         return result.content if result else None
+
+    def _l0_terms(self) -> set:
+        """Term set of the resident L0 hot zone (MEMORY.md + USER.md).
+
+        Used by the C-① prefetch dedup gate to drop recall hits that would just
+        replay what is already always-loaded. Cached on the (mtime,size)
+        signature of the two files — a plain local read, no network, and no
+        recompute unless the hot zone actually changed. Never writes anything.
+        """
+        if self._root is None:
+            return set()
+        mem_dir = self._root.parent / "memories"
+        sig: List[tuple] = []
+        texts: List[str] = []
+        for fname in ("MEMORY.md", "USER.md"):
+            p = mem_dir / fname
+            try:
+                st = p.stat()
+                sig.append((fname, st.st_mtime, st.st_size))
+                texts.append(p.read_text(encoding="utf-8"))
+            except OSError:
+                sig.append((fname, 0.0, 0))
+        signature = tuple(sig)
+        if signature != self._l0_terms_sig:
+            self._l0_terms_cache = gate.terms("\n".join(texts))
+            self._l0_terms_sig = signature
+        return self._l0_terms_cache or set()
 
     # -- ① recall: sync_turn (filtered, deduped indexing) --------------------
 
